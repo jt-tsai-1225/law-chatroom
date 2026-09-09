@@ -1,0 +1,89 @@
+# ============ .NET / C# ============
+bin/
+obj/
+[Dd]ebug/
+[Rr]elease/
+x64/
+x86/
+[Ww][Ii][Nn]32/
+[Aa][Rr][Mm]/
+[Bb]uild[Ll]og.*
+
+# Visual Studio / Rider 使用者設定
+.vs/
+.idea/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+*.userprefs
+
+# NuGet
+*.nupkg
+*.snupkg
+packages/
+!packages/build/
+project.lock.json
+project.fragment.lock.json
+
+# 發佈輸出
+publish/
+*.[Pp]ublish.xml
+*.pubxml
+*.azurePubxml
+PublishScripts/
+
+# 測試 / 分析結果
+[Tt]est[Rr]esult*/
+[Bb]uild[Rr]esults/
+*.coverage
+*.coveragexml
+BenchmarkDotNet.Artifacts/
+
+# EF Core / 本機資料庫
+*.mdf
+*.ldf
+*.ndf
+*.dbmdl
+
+# 機密設定（重要）
+appsettings.Development.json
+appsettings.Local.json
+secrets.json
+
+# ============ Vue.js / Node ============
+node_modules/
+dist/
+dist-ssr/
+.output/
+.nuxt/
+.vite/
+*.local
+
+# 環境變數
+.env
+.env.*
+!.env.example
+
+# 套件管理器 log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+.pnpm-store/
+
+# 快取
+.eslintcache
+.stylelintcache
+coverage/
+*.tsbuildinfo
+
+# ============ 編輯器 / 作業系統 ============
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+.DS_Store
+Thumbs.db
+desktop.ini
+*.swp
+*~

@@ -1,0 +1,17 @@
+# 法律 PDF 匯入工具依賴
+# 安裝: pip install -r requirements_import.txt
+
+# 環境變數載入
+python-dotenv>=1.0.0
+
+# PDF 解析
+pymupdf>=1.23.0
+
+# Qdrant 客戶端
+qdrant-client>=1.7.0
+
+# HTTP 請求
+requests>=2.31.0
+
+# 進度顯示
+tqdm>=4.65.0

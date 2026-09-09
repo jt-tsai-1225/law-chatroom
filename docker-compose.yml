@@ -1,0 +1,41 @@
+services:
+  backend:
+    build:
+      context: ./backend/ChatBot.Api
+      dockerfile: Dockerfile
+    image: chatbot-backend:latest
+    container_name: chatbot-backend
+    ports:
+      - "8000:8000"
+    environment:
+      - ASPNETCORE_ENVIRONMENT=Development
+      - ASPNETCORE_URLS=http://+:8000
+      - QDRANT_HOST=qdrant
+      - QDRANT_PORT=6333
+      - QDRANT_GRPC_PORT=6334
+      - EMBEDDING_API_KEY=${EMBEDDING_API_KEY:-your-api-key-here}
+      - EMBEDDING_MODEL=text-embedding-ada-002
+    depends_on:
+      qdrant:
+        condition: service_started
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    image: chatbot-frontend:latest
+    container_name: chatbot-frontend
+    ports:
+      - "80:80"
+    depends_on:
+      - backend
+
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: chatbot-qdrant
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    volumes:
+      - ./qdrant_storage:/qdrant/storage
+    restart: unless-stopped
