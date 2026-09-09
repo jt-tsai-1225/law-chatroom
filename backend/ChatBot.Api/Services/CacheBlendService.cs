@@ -126,8 +126,13 @@ public class CacheBlendService : ICacheBlendService
             return 0.0;
 
         // 1. 關鍵字重疊計數 (Jaccard Similarity)
+        // 注意：cacheEntry.Key 是 SHA256 雜湊字串，不能拿來做文字相似度比對，
+        // 必須使用儲存時一併保留下來的原始 prompt (SourcePrompt)。
+        if (string.IsNullOrEmpty(cacheEntry.SourcePrompt))
+            return 0.0;
+
         var currentTokens = Tokenize(currentPrompt);
-        var cachedTokens = Tokenize(cacheEntry.Key);  // 使用 cache key（原始 prompt 雜湊的前綴）
+        var cachedTokens = Tokenize(cacheEntry.SourcePrompt);
         
         var currentSet = new HashSet<string>(currentTokens);
         var cachedSet = new HashSet<string>(cachedTokens);

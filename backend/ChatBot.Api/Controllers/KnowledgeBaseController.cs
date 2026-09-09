@@ -125,39 +125,18 @@ public class KnowledgeBaseController : ControllerBase
 
     /// <summary>
     /// 列出知識庫中的所有文件
+    /// 注意：此功能尚未實作。目前沒有維護獨立的文件索引，
+    /// 無法列出 Qdrant 集合中的全部內容，請改用 /api/knowledgebase/search 依關鍵字查詢。
     /// </summary>
     [HttpGet("documents")]
-    public async Task<IActionResult> GetDocuments([FromQuery] string? domain = null)
+    public IActionResult GetDocuments([FromQuery] string? domain = null)
     {
-        try
+        return StatusCode(501, new
         {
-            await _qdrantService.InitializeCollectionAsync();
-
-            // 這裡可以實現從 Qdrant 獲取所有文件的元數據
-            // 由於 Qdrant 不直接提供列出所有功能的 API，
-            // 實際應用中應該維護一個索引資料庫
-            
-            // 這裡返回示例數據
-            var documents = new List<KnowledgeDocument>
-            {
-                new()
-                {
-                    Id = "1",
-                    Title = domain ?? "所有領域",
-                    Content = "知識庫中的法律條文",
-                    Chapter = "示例",
-                    ArticleNumber = "第一條",
-                    UploadedAt = DateTime.UtcNow
-                }
-            };
-
-            return Ok(new { documents, count = documents.Count });
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "獲取知識庫文件列表失敗");
-            return StatusCode(500, new { message = "獲取文件列表失敗", error = ex.Message });
-        }
+            documents = Array.Empty<KnowledgeDocument>(),
+            count = 0,
+            message = "列出全部文件功能尚未實作，請改用 GET /api/knowledgebase/search?query=... 查詢知識庫內容"
+        });
     }
 
     /// <summary>

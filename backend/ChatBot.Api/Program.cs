@@ -53,16 +53,12 @@ builder.Services.Configure<RAGSettings>(builder.Configuration.GetSection("RAGSet
 // Configure Qdrant client
 // Qdrant gRPC 使用端口 6334，HTTP API 使用端口 6333
 // .NET Client (QueryAsync) 使用 gRPC 連接，所以需要使用 6334
+// 所有設定皆可用 RAGSettings__QdrantHost / RAGSettings__QdrantGrpcPort 等環境變數覆寫
 var ragSettings = builder.Configuration.GetSection("RAGSettings").Get<RAGSettings>();
-
-// 從 Configuration 讀取 gRPC 端口（支援環境變數 QDRANT_GRPC_PORT）
-var grpcPortStr = builder.Configuration.GetValue<string>("QDRANT_GRPC_PORT") ??
-                  ragSettings?.QdrantGrpcPort.ToString() ?? "6334";
-var grpcPort = int.Parse(grpcPortStr);
 
 builder.Services.AddSingleton(sp => new QdrantClient(
     host: ragSettings?.QdrantHost ?? "qdrant",
-    port: grpcPort));
+    port: ragSettings?.QdrantGrpcPort ?? 6334));
 
 var app = builder.Build();
 

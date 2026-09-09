@@ -1,15 +1,15 @@
 <template>
   <div class="chat-container">
     <div class="chat-header">
-      <h1>🤖 ChatBot</h1>
-      <p class="subtitle">AI Assistant</p>
+      <h1>⚖️ 法律諮詢聊天機器人</h1>
+      <p class="subtitle">民法・公司法 諮詢助手</p>
     </div>
 
     <div class="chat-messages" ref="messagesContainer">
       <div v-for="(msg, index) in messages" :key="index" 
            :class="['message', msg.role === 'user' ? 'user-message' : 'bot-message']">
         <div class="message-content">
-          <strong>{{ msg.role === 'user' ? 'You' : 'Bot' }}:</strong>
+          <strong>{{ msg.role === 'user' ? '您' : '助手' }}:</strong>
           <p>{{ msg.content }}</p>
         </div>
         <span class="message-time">{{ formatTime(msg.timestamp) }}</span>
@@ -17,15 +17,15 @@
     </div>
 
     <div class="chat-input">
-      <input 
-        v-model="newMessage" 
+      <input
+        v-model="newMessage"
         @keyup.enter="sendMessage"
-        placeholder="Type your message..."
+        placeholder="請輸入您的法律問題..."
         :disabled="loading"
       />
       <button @click="sendMessage" :disabled="!newMessage.trim() || loading">
         <span v-if="loading" class="spinner"></span>
-        <span v-else>Send</span>
+        <span v-else>送出</span>
       </button>
     </div>
   </div>
@@ -38,7 +38,7 @@ import axios from 'axios'
 const messages = ref([
   {
     role: 'bot',
-    content: 'Hello! I\'m your AI chatbot. How can I help you today?',
+    content: '您好！我是法律諮詢助手，專注於中華民國民法與公司法領域，請問有什麼問題想要諮詢？',
     timestamp: new Date()
   }
 ])
@@ -76,7 +76,7 @@ async function sendMessage() {
     console.error('Error sending message:', error)
     messages.value.push({
       role: 'bot',
-      content: 'Sorry, I encountered an error. Please try again.',
+      content: '抱歉，發生錯誤，請稍後再試一次。',
       timestamp: new Date()
     })
   } finally {

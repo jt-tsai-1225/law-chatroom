@@ -35,7 +35,8 @@ public interface ILMCacheService
     /// <param name="cacheKey">快取鍵</param>
     /// <param name="response">LLM 回應內容</param>
     /// <param name="metadata">額外中繼資料（可選）</param>
-    void Set(string cacheKey, string response, Dictionary<string, object>? metadata = null);
+    /// <param name="sourcePrompt">產生此回應的原始 prompt 文字（供 CacheBlend 相似度比對使用）</param>
+    void Set(string cacheKey, string response, Dictionary<string, object>? metadata = null, string? sourcePrompt = null);
 
     /// <summary>
     /// 檢查快取鍵是否存在
@@ -69,6 +70,11 @@ public class CacheEntry
     public long AccessCount { get; set; } = 0;
     public Dictionary<string, object>? Metadata { get; set; }
     public string? Hash { get; set; }  // 用於快速匹配
+
+    /// <summary>
+    /// 產生此快取項目時使用的原始 prompt 文字（Key 只是它的 SHA256 雜湊，無法用於相似度比對）
+    /// </summary>
+    public string? SourcePrompt { get; set; }
 }
 
 /// <summary>

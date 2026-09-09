@@ -23,7 +23,7 @@ public class EmbeddingService : IEmbeddingService
 
     public EmbeddingService(IHttpClientFactory httpClientFactory, IOptions<RAGSettings> settings)
     {
-        _httpClient = httpClientFactory.CreateClient();
+        _httpClient = httpClientFactory.CreateClient("Embedding");
         _settings = settings.Value;
     }
 

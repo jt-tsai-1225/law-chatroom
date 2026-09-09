@@ -99,7 +99,7 @@ public class LLMService : ILLMService
         ILMCacheService? cacheService = null,
         ICacheBlendService? blendService = null)
     {
-        _httpClient = httpClientFactory.CreateClient();
+        _httpClient = httpClientFactory.CreateClient("LLM");
         _settings = settings.Value;
         _logger = logger;
         _cacheService = cacheService;
@@ -149,12 +149,15 @@ public class LLMService : ILLMService
         }
         
         // 2. 構建請求
+        // 注意：目前僅實作非串流呼叫並讀取完整回應。
+        // 若將 Stream 設為 true，API 會回傳 SSE (text/event-stream) 格式而非單一 JSON，
+        // 下方的 JsonDocument.Parse 會失敗，因此這裡必須維持 false。
         var requestBody = new ChatCompletionRequest
         {
             Model = _settings.LlmModel,
             Temperature = _settings.LlmTemperature,
             MaxTokens = _settings.LlmMaxTokens,
-            Stream = true // 啟用串流以量測 TTFT
+            Stream = false
         };
 
         var jsonRequest = JsonSerializer.Serialize(requestBody);
@@ -169,9 +172,6 @@ public class LLMService : ILLMService
             new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", _settings.LlmApiKey);
 
         // 3. 發送請求並量測 TTFT
-        var requestStopwatch = System.Diagnostics.Stopwatch.StartNew();
-        var firstTokenTime = DateTimeOffset.UtcNow;
-        
         var responseTask = _httpClient.PostAsync(_settings.LlmEndpoint, requestContent, cancellationToken);
         
         HttpResponseMessage response;
@@ -232,7 +232,7 @@ public class LLMService : ILLMService
         if (_cacheService != null && _cacheService.IsEnabled && !string.IsNullOrEmpty(result.Content))
         {
             var cacheKey = LMCacheService.GenerateCacheKey(systemPrompt, userPrompt);
-            _cacheService.Set(cacheKey, result.Content);
+            _cacheService.Set(cacheKey, result.Content, sourcePrompt: $"{systemPrompt}\n{userPrompt}");
             _logger.LogDebug("已將回應儲存到 LMcache - 鍵: {CacheKey}", cacheKey);
         }
         

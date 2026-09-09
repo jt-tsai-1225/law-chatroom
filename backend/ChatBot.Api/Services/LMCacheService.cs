@@ -98,7 +98,7 @@ public class LMCacheService : ILMCacheService
     /// <summary>
     /// 將 LLM 回應儲存到快取
     /// </summary>
-    public void Set(string cacheKey, string response, Dictionary<string, object>? metadata = null)
+    public void Set(string cacheKey, string response, Dictionary<string, object>? metadata = null, string? sourcePrompt = null)
     {
         if (!IsEnabled)
         {
@@ -123,7 +123,8 @@ public class LMCacheService : ILMCacheService
             Key = cacheKey,
             Value = response,
             CreatedAt = DateTime.UtcNow,
-            Metadata = metadata
+            Metadata = metadata,
+            SourcePrompt = sourcePrompt
         };
 
         _cache[cacheKey] = entry;

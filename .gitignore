@@ -50,6 +50,10 @@ BenchmarkDotNet.Artifacts/
 appsettings.Development.json
 appsettings.Local.json
 secrets.json
+k8s/backend-secret.yaml
+
+# Qdrant 執行期資料（不應提交到版控）
+qdrant_storage/
 
 # ============ Vue.js / Node ============
 node_modules/

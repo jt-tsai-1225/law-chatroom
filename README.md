@@ -128,6 +128,14 @@ docker build -t chatbot-frontend:latest ./frontend
 
 # 3. 部署到 Kubernetes
 kubectl apply -f k8s/qdrant.yaml
+
+# 3.1 先用真實的 API Key 建立/更新 Secret，
+#     不要直接套用 k8s/backend.yaml 內建的 REPLACE_ME 佔位值
+kubectl create secret generic chatbot-backend-secret \
+  --from-literal=RAGSettings__EmbeddingApiKey=<your-embedding-api-key> \
+  --from-literal=RAGSettings__LlmApiKey=<your-llm-api-key> \
+  --dry-run=client -o yaml | kubectl apply -f -
+
 kubectl apply -f k8s/backend.yaml
 kubectl apply -f k8s/frontend.yaml
 kubectl apply -f k8s/ingress.yaml
@@ -165,7 +173,7 @@ kubectl logs -l app=chatbot-frontend
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | POST | `/api/knowledgebase/upload` | 上傳 PDF 文件 |
-| GET | `/api/knowledgebase/documents` | 列出所有文件 |
+| GET | `/api/knowledgebase/documents` | 列出所有文件（尚未實作，回傳 501，請改用 search） |
 | GET | `/api/knowledgebase/search?query=xxx` | 搜尋知識庫 |
 | DELETE | `/api/knowledgebase/documents/{id}` | 刪除文件 |
 | DELETE | `/api/knowledgebase/clear` | 清空知識庫 |

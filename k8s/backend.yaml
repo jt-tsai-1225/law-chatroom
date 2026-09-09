@@ -1,3 +1,22 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: chatbot-backend-config
+data:
+  RAGSettings__QdrantHost: "qdrant"
+  RAGSettings__QdrantPort: "6333"
+  RAGSettings__QdrantGrpcPort: "6334"
+  RAGSettings__EmbeddingEndpoint: "https://ainexus.phison.com/api/external/v1/embeddings"
+  RAGSettings__EmbeddingModel: "Qwen/Qwen3-Embedding-0.6B"
+  RAGSettings__LlmEndpoint: "https://ainexus.phison.com/api/external/v1/chat/completions"
+  RAGSettings__LlmModel: "Qwen/Qwen3.6-35B-A3B-FP8"
+---
+# 注意：chatbot-backend-secret 這個 Secret 不在這個檔案裡（避免把佔位值誤套用、
+# 或反過來覆蓋掉你已經建立的真實金鑰）。部署前請先用以下指令建立：
+#   kubectl create secret generic chatbot-backend-secret \
+#     --from-literal=RAGSettings__EmbeddingApiKey=<your-embedding-api-key> \
+#     --from-literal=RAGSettings__LlmApiKey=<your-llm-api-key>
+# 或參考 k8s/backend-secret.example.yaml。
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -21,6 +40,11 @@ spec:
         ports:
         - containerPort: 8000
           protocol: TCP
+        envFrom:
+        - configMapRef:
+            name: chatbot-backend-config
+        - secretRef:
+            name: chatbot-backend-secret
         resources:
           requests:
             memory: "128Mi"

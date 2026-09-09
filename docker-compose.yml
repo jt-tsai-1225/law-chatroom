@@ -10,11 +10,17 @@ services:
     environment:
       - ASPNETCORE_ENVIRONMENT=Development
       - ASPNETCORE_URLS=http://+:8000
-      - QDRANT_HOST=qdrant
-      - QDRANT_PORT=6333
-      - QDRANT_GRPC_PORT=6334
-      - EMBEDDING_API_KEY=${EMBEDDING_API_KEY:-your-api-key-here}
-      - EMBEDDING_MODEL=text-embedding-ada-002
+      # 注意：要覆寫 appsettings.json 裡巢狀的 RAGSettings 設定，
+      # 環境變數必須用雙底線 (RAGSettings__X) 表示巢狀路徑，扁平的 EMBEDDING_API_KEY 等名稱不會被綁定。
+      - RAGSettings__QdrantHost=qdrant
+      - RAGSettings__QdrantPort=6333
+      - RAGSettings__QdrantGrpcPort=6334
+      - RAGSettings__EmbeddingApiKey=${EMBEDDING_API_KEY:-}
+      - RAGSettings__EmbeddingEndpoint=${EMBEDDING_ENDPOINT:-https://ainexus.phison.com/api/external/v1/embeddings}
+      - RAGSettings__EmbeddingModel=${EMBEDDING_MODEL:-Qwen/Qwen3-Embedding-0.6B}
+      - RAGSettings__LlmApiKey=${LLM_API_KEY:-}
+      - RAGSettings__LlmEndpoint=${LLM_ENDPOINT:-https://ainexus.phison.com/api/external/v1/chat/completions}
+      - RAGSettings__LlmModel=${LLM_MODEL:-Qwen/Qwen3.6-35B-A3B-FP8}
     depends_on:
       qdrant:
         condition: service_started
