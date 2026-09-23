@@ -33,19 +33,17 @@ builder.Services.AddHttpClient("Embedding", client =>
 builder.Services.AddScoped<IEmbeddingService, EmbeddingService>();
 
 // Register LLM service for RAG response generation
-builder.Services.AddHttpClient("LLM", client =>
-{
-    client.Timeout = TimeSpan.FromSeconds(60);
-});
 builder.Services.AddScoped<ILLMService, LLMService>();
+
+// Tokenizer 與 prompt 組裝（CacheBlend 需要以 token id 送出請求）
+// TokenizerClient 為 Singleton：它對固定文字（系統提示詞、分隔符、條文片段）
+// 做記憶體快取，跨請求共用才有意義。
+builder.Services.AddSingleton<ITokenizerClient, TokenizerClient>();
+builder.Services.AddScoped<IPromptBuilder, PromptBuilder>();
 
 // Register LMcache service
 builder.Services.AddSingleton<LMCacheService>();
 builder.Services.AddScoped<ILMCacheService>(sp => sp.GetRequiredService<LMCacheService>());
-
-// Register CacheBlend service
-builder.Services.AddSingleton<CacheBlendService>();
-builder.Services.AddScoped<ICacheBlendService>(sp => sp.GetRequiredService<CacheBlendService>());
 
 // Register RAG settings from configuration
 builder.Services.Configure<RAGSettings>(builder.Configuration.GetSection("RAGSettings"));

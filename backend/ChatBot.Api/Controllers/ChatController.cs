@@ -11,18 +11,15 @@ public class ChatController : ControllerBase
     private readonly IChatBotService _chatBotService;
     private readonly ILogger<ChatController> _logger;
     private readonly ILMCacheService? _cacheService;
-    private readonly ICacheBlendService? _blendService;
 
     public ChatController(
         IChatBotService chatBotService,
         ILogger<ChatController> logger,
-        ILMCacheService? cacheService = null,
-        ICacheBlendService? blendService = null)
+        ILMCacheService? cacheService = null)
     {
         _chatBotService = chatBotService;
         _logger = logger;
         _cacheService = cacheService;
-        _blendService = blendService;
     }
 
     [HttpPost]
@@ -162,7 +159,10 @@ public class ChatController : ControllerBase
             };
 
             // 獲取當前設定
-            var setting = "RAG + LMcache" + (_blendService != null && _blendService.IsEnabled ? " + CacheBlend" : "");
+            // CacheBlend 是否生效不看 C# 這層，而看每次回答的 cached_tokens；
+            // 這裡只記錄 C# 回答快取的開關狀態。
+            var setting = "RAG + vLLM(LMCache/CacheBlend)"
+                          + (_cacheService is { IsEnabled: true } ? " + C# 回答快取" : "");
 
             var benchmarkResponse = new BenchmarkResponse
             {

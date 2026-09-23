@@ -1,87 +1,47 @@
-using System.Net.Http.Json;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using ChatBot.Api.Configuration;
 using Microsoft.Extensions.Options;
 
 namespace ChatBot.Api.Services;
 
-/// <summary>
-/// LLM 服務回應包含 TTFT 量測資訊
-/// </summary>
+/// <summary>一次生成的結果，含判讀 CacheBlend 命中率所需的欄位。</summary>
 public class LLMCompletionResult
 {
     public string Content { get; set; } = "";
+
+    /// <summary>真正的 TTFT：送出請求到收到第一個有內容的串流事件。</summary>
     public long TtftMilliseconds { get; set; }
+
     public long TotalMilliseconds { get; set; }
     public int TokenCount { get; set; }
     public double TokensPerSecond { get; set; }
+
+    /// <summary>是否由 C# 層的回答快取直接回傳（會使 TTFT 失去意義，見 RAGSettings.LmcacheEnabled）。</summary>
     public bool FromCache { get; set; }
+
+    /// <summary>引擎回報的 prompt 長度。</summary>
+    public int PromptTokens { get; set; }
+
+    /// <summary>引擎回報的 KV 快取命中 token 數，需 vLLM 啟動時帶 --enable-prompt-tokens-details。</summary>
+    public int CachedTokens { get; set; }
+
+    public double CacheHitRate => PromptTokens > 0 ? (double)CachedTokens / PromptTokens * 100 : 0;
 }
 
-/// <summary>
-/// LLM Chat 服務 - 用於生成 RAG 回覆
-/// </summary>
 public interface ILLMService
 {
-    Task<string> GenerateCompletionAsync(
-        string systemPrompt,
-        string userPrompt,
-        CancellationToken cancellationToken = default);
-    
     /// <summary>
-    /// 生成完成並返回 TTFT 量測結果
+    /// 以 token id 陣列送出生成請求。
+    ///
+    /// 為什麼不是送文字：CacheBlend 需要在片段之間插入精確的分隔符 token，
+    /// 若送字串由伺服端 tokenize，分隔符會與相鄰文字合併成不同的 token，
+    /// 片段邊界就對不上、快取永遠不命中。組裝的工作在 PromptBuilder。
     /// </summary>
-    Task<LLMCompletionResult> GenerateCompletionWithTimingAsync(
-        string systemPrompt,
-        string userPrompt,
+    Task<LLMCompletionResult> GenerateFromTokensAsync(
+        IReadOnlyList<int> promptTokens,
         CancellationToken cancellationToken = default);
-}
-
-/// <summary>
-/// Chat completion 請求物件 (OpenAI API 格式)
-/// </summary>
-public class ChatCompletionRequest
-{
-    [System.Text.Json.Serialization.JsonPropertyName("model")]
-    public string Model { get; set; } = "";
-    
-    [System.Text.Json.Serialization.JsonPropertyName("messages")]
-    public List<ChatMessage> Messages { get; set; } = new();
-    
-    [System.Text.Json.Serialization.JsonPropertyName("temperature")]
-    public double Temperature { get; set; } = 0.2;
-    
-    [System.Text.Json.Serialization.JsonPropertyName("max_tokens")]
-    public int MaxTokens { get; set; } = 2000;
-    
-    [System.Text.Json.Serialization.JsonPropertyName("stream")]
-    public bool Stream { get; set; } = false;
-}
-
-/// <summary>
-/// Chat message
-/// </summary>
-public class ChatMessage
-{
-    [System.Text.Json.Serialization.JsonPropertyName("role")]
-    public string Role { get; set; } = "";
-    
-    [System.Text.Json.Serialization.JsonPropertyName("content")]
-    public string Content { get; set; } = "";
-}
-
-/// <summary>
-/// Chat completion 回應物件
-/// </summary>
-public class ChatCompletionResponse
-{
-    public List<Choice> Choices { get; set; } = new();
-}
-
-public class Choice
-{
-    public ChatMessage Message { get; set; } = new();
 }
 
 public class LLMService : ILLMService
@@ -90,177 +50,211 @@ public class LLMService : ILLMService
     private readonly RAGSettings _settings;
     private readonly ILogger<LLMService> _logger;
     private readonly ILMCacheService? _cacheService;
-    private readonly ICacheBlendService? _blendService;
 
     public LLMService(
         IHttpClientFactory httpClientFactory,
         IOptions<RAGSettings> settings,
         ILogger<LLMService> logger,
-        ILMCacheService? cacheService = null,
-        ICacheBlendService? blendService = null)
+        ILMCacheService? cacheService = null)
     {
-        _httpClient = httpClientFactory.CreateClient();
         _settings = settings.Value;
+        _httpClient = httpClientFactory.CreateClient();
+        _httpClient.Timeout = TimeSpan.FromSeconds(_settings.LlmTimeoutSeconds);
         _logger = logger;
         _cacheService = cacheService;
-        _blendService = blendService;
     }
 
-    public Task<string> GenerateCompletionAsync(
-        string systemPrompt,
-        string userPrompt,
-        CancellationToken cancellationToken = default)
+    private sealed class StreamOptions
     {
-        return GenerateCompletionWithTimingAsync(systemPrompt, userPrompt, cancellationToken).ContinueWith(
-            t => t.Result.Content,
-            System.Threading.CancellationToken.None,
-            System.Threading.Tasks.TaskContinuationOptions.None,
-            System.Threading.Tasks.TaskScheduler.Default);
+        [JsonPropertyName("include_usage")] public bool IncludeUsage { get; set; } = true;
     }
 
-    public async Task<LLMCompletionResult> GenerateCompletionWithTimingAsync(
-        string systemPrompt,
-        string userPrompt,
+    private sealed class CompletionRequest
+    {
+        [JsonPropertyName("model")] public string Model { get; set; } = "";
+        [JsonPropertyName("prompt")] public int[] Prompt { get; set; } = Array.Empty<int>();
+        [JsonPropertyName("max_tokens")] public int MaxTokens { get; set; }
+        [JsonPropertyName("temperature")] public double Temperature { get; set; }
+        [JsonPropertyName("stream")] public bool Stream { get; set; } = true;
+        [JsonPropertyName("stream_options")] public StreamOptions StreamOptions { get; set; } = new();
+    }
+
+    public async Task<LLMCompletionResult> GenerateFromTokensAsync(
+        IReadOnlyList<int> promptTokens,
         CancellationToken cancellationToken = default)
     {
         var totalStopwatch = System.Diagnostics.Stopwatch.StartNew();
         var result = new LLMCompletionResult();
-        
-        // 1. 檢查快取
-        if (_cacheService != null && _cacheService.IsEnabled)
+
+        // C# 層的回答快取。預設關閉——它一命中就不會送到推論引擎，TTFT 記成 0，
+        // 量到的不是 CacheBlend 省下的時間。見 RAGSettings.LmcacheEnabled 的說明。
+        string? cacheKey = null;
+        if (_cacheService is { IsEnabled: true })
         {
-            var cacheKey = LMCacheService.GenerateCacheKey(systemPrompt, userPrompt);
-            
-            var cachedResponse = _cacheService.Get(cacheKey);
-            if (cachedResponse != null)
+            cacheKey = LMCacheService.GenerateCacheKey(
+                string.Join(',', promptTokens.Take(64)),
+                promptTokens.Count.ToString());
+
+            var cached = _cacheService.Get(cacheKey);
+            if (cached != null)
             {
+                totalStopwatch.Stop();
                 result.FromCache = true;
-                result.Content = cachedResponse;
-                result.TtftMilliseconds = 0; // 快取命中，TTFT 為 0
+                result.Content = cached;
+                result.TtftMilliseconds = 0;
                 result.TotalMilliseconds = totalStopwatch.ElapsedMilliseconds;
-                result.TokenCount = EstimateTokenCount(cachedResponse);
-                result.TokensPerSecond = result.TotalMilliseconds > 0
-                    ? (result.TokenCount / (double)result.TotalMilliseconds) * 1000
-                    : 0;
-                
-                _logger.LogInformation("LMcache 命中 - 總耗時: {Total}ms", result.TotalMilliseconds);
+                result.TokenCount = EstimateTokenCount(cached);
+                _logger.LogInformation("C# 回答快取命中，未送往推論引擎（TTFT 不具參考價值）");
                 return result;
             }
         }
-        
-        // 2. 構建請求
-        var requestBody = new ChatCompletionRequest
+
+        var url = $"{_settings.LlmBaseUrl.TrimEnd('/')}/v1/completions";
+        var body = new CompletionRequest
         {
             Model = _settings.LlmModel,
-            Temperature = _settings.LlmTemperature,
+            Prompt = promptTokens.ToArray(),
             MaxTokens = _settings.LlmMaxTokens,
-            Stream = true // 啟用串流以量測 TTFT
+            Temperature = _settings.LlmTemperature
         };
 
-        var jsonRequest = JsonSerializer.Serialize(requestBody);
-        _logger.LogDebug("LLM 請求內容: {Request}", jsonRequest);
+        using var request = new HttpRequestMessage(HttpMethod.Post, url)
+        {
+            Content = new StringContent(
+                JsonSerializer.Serialize(body), Encoding.UTF8, "application/json")
+        };
 
-        var requestContent = new StringContent(
-            jsonRequest,
-            Encoding.UTF8,
-            "application/json");
+        if (!string.IsNullOrEmpty(_settings.LlmApiKey))
+        {
+            request.Headers.Authorization =
+                new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", _settings.LlmApiKey);
+        }
 
-        _httpClient.DefaultRequestHeaders.Authorization =
-            new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", _settings.LlmApiKey);
-
-        // 3. 發送請求並量測 TTFT
         var requestStopwatch = System.Diagnostics.Stopwatch.StartNew();
-        var firstTokenTime = DateTimeOffset.UtcNow;
-        
-        var responseTask = _httpClient.PostAsync(_settings.LlmEndpoint, requestContent, cancellationToken);
-        
-        HttpResponseMessage response;
-        try
-        {
-            response = await responseTask;
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "LLM API 呼叫失敗");
-            throw;
-        }
-        
-        // 注意：對於非串流請求，TTFT = 直到收到完整回應的時間
-        // 因為我們無法在半途攔截非串流回應
-        var ttftStopwatch = System.Diagnostics.Stopwatch.StartNew();
-        
+
+        // ResponseHeadersRead 是量到真實 TTFT 的關鍵：預設的 ResponseContentRead
+        // 會等整個回應收完才返回，那樣量到的其實是總耗時。
+        using var response = await _httpClient.SendAsync(
+            request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
+
         if (!response.IsSuccessStatusCode)
         {
-            var errorContent = await response.Content.ReadAsStringAsync(cancellationToken);
-            _logger.LogError("LLM API 返回錯誤 {StatusCode}: {Error}", response.StatusCode, errorContent);
-            throw new HttpRequestException($"LLM API 返回錯誤 {response.StatusCode}: {errorContent}");
+            var error = await response.Content.ReadAsStringAsync(cancellationToken);
+            _logger.LogError("推論引擎回傳 {Status}：{Error}", (int)response.StatusCode, error);
+            throw new HttpRequestException($"推論引擎回傳 {(int)response.StatusCode}：{error}");
         }
 
-        // 4. 讀取完整回應
-        var json = await response.Content.ReadAsStringAsync(cancellationToken);
-        ttftStopwatch.Stop();
-        
-        result.TtftMilliseconds = ttftStopwatch.ElapsedMilliseconds;
-        
-        _logger.LogDebug("LLM 回應內容: {Response}", json);
-        
-        // 5. 解析回應
-        var jsonObject = JsonDocument.Parse(json).RootElement;
-        
-        var choices = jsonObject.GetProperty("choices");
-        if (choices.GetArrayLength() == 0)
+        await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
+        using var reader = new StreamReader(stream, Encoding.UTF8);
+
+        var builder = new StringBuilder();
+        long? ttft = null;
+        var generatedTokens = 0;
+
+        while (true)
         {
-            _logger.LogWarning("LLM 回應沒有 choices 欄位");
-            result.Content = "";
-        }
-        else
-        {
-            var firstChoice = choices[0];
-            if (firstChoice.TryGetProperty("message", out var message) &&
-                message.TryGetProperty("content", out var content))
+            var line = await reader.ReadLineAsync(cancellationToken);
+            if (line is null) break;
+            if (!line.StartsWith("data:", StringComparison.Ordinal)) continue;
+
+            var payload = line[5..].Trim();
+            if (payload.Length == 0) continue;
+            if (payload == "[DONE]") break;
+
+            JsonElement root;
+            try
             {
-                result.Content = content.GetString() ?? "";
+                using var doc = JsonDocument.Parse(payload);
+                root = doc.RootElement.Clone();
             }
-            else
+            catch (JsonException ex)
             {
-                _logger.LogWarning("LLM 回應沒有 message 或 content 欄位");
-                result.Content = "";
+                _logger.LogWarning(ex, "無法解析串流事件，已略過：{Payload}", Truncate(payload, 200));
+                continue;
+            }
+
+            // usage 只出現在最後一筆，需要 stream_options.include_usage
+            if (root.TryGetProperty("usage", out var usage) &&
+                usage.ValueKind == JsonValueKind.Object)
+            {
+                if (usage.TryGetProperty("prompt_tokens", out var pt) &&
+                    pt.ValueKind == JsonValueKind.Number)
+                {
+                    result.PromptTokens = pt.GetInt32();
+                }
+
+                if (usage.TryGetProperty("prompt_tokens_details", out var details) &&
+                    details.ValueKind == JsonValueKind.Object &&
+                    details.TryGetProperty("cached_tokens", out var ct) &&
+                    ct.ValueKind == JsonValueKind.Number)
+                {
+                    result.CachedTokens = ct.GetInt32();
+                }
+            }
+
+            if (!root.TryGetProperty("choices", out var choices) ||
+                choices.ValueKind != JsonValueKind.Array)
+            {
+                continue;
+            }
+
+            foreach (var choice in choices.EnumerateArray())
+            {
+                if (!choice.TryGetProperty("text", out var textElement)) continue;
+
+                var text = textElement.GetString();
+                if (string.IsNullOrEmpty(text)) continue;
+
+                ttft ??= requestStopwatch.ElapsedMilliseconds;
+                builder.Append(text);
+                generatedTokens++;
             }
         }
-        
-        // 6. 儲存到快取
-        if (_cacheService != null && _cacheService.IsEnabled && !string.IsNullOrEmpty(result.Content))
-        {
-            var cacheKey = LMCacheService.GenerateCacheKey(systemPrompt, userPrompt);
-            _cacheService.Set(cacheKey, result.Content);
-            _logger.LogDebug("已將回應儲存到 LMcache - 鍵: {CacheKey}", cacheKey);
-        }
-        
-        // 7. 計算統計資訊
+
         totalStopwatch.Stop();
+
+        result.Content = builder.ToString().Trim();
+        result.TtftMilliseconds = ttft ?? totalStopwatch.ElapsedMilliseconds;
         result.TotalMilliseconds = totalStopwatch.ElapsedMilliseconds;
-        result.TokenCount = EstimateTokenCount(result.Content);
+        result.TokenCount = generatedTokens > 0 ? generatedTokens : EstimateTokenCount(result.Content);
         result.TokensPerSecond = result.TotalMilliseconds > 0
-            ? (result.TokenCount / (double)result.TotalMilliseconds) * 1000
+            ? result.TokenCount / (double)result.TotalMilliseconds * 1000
             : 0;
-        
+
+        if (result.PromptTokens == 0)
+        {
+            _logger.LogWarning(
+                "回應沒有 usage.prompt_tokens，無法判讀快取命中率。" +
+                "請確認 vLLM 啟動時帶了 --enable-prompt-tokens-details");
+        }
+
         _logger.LogInformation(
-            "LLM 呼叫完成 - TTFT: {Ttft}ms, 總耗時: {Total}ms, Tokens: {Tokens}, 吞吐量: {Tps:.2f} tokens/s",
-            result.TtftMilliseconds, result.TotalMilliseconds, result.TokenCount, result.TokensPerSecond);
+            "生成完成 — TTFT: {Ttft}ms, 總耗時: {Total}ms, 產生 {Gen} tokens, " +
+            "prompt {Prompt} tokens, 快取命中 {Cached}（{Rate:F1}%）",
+            result.TtftMilliseconds, result.TotalMilliseconds, result.TokenCount,
+            result.PromptTokens, result.CachedTokens, result.CacheHitRate);
+
+        if (cacheKey != null && _cacheService is { IsEnabled: true } &&
+            !string.IsNullOrEmpty(result.Content))
+        {
+            _cacheService.Set(cacheKey, result.Content);
+        }
 
         return result;
     }
-    
-    /// <summary>
-    /// 估算 token 數量（簡化版：中文字符約 1:1，英文單詞約 1.3:1）
-    /// </summary>
-    private int EstimateTokenCount(string text)
+
+    private static string Truncate(string s, int max)
+        => s.Length <= max ? s : s[..max] + "…";
+
+    /// <summary>串流事件數不可得時的後備估算（中文字約 1:1，英文詞約 1.3:1）。</summary>
+    private static int EstimateTokenCount(string text)
     {
         if (string.IsNullOrEmpty(text)) return 0;
-        
+
         var chineseChars = text.Count(c => c >= 0x4E00 && c <= 0x9FFF);
-        var englishWords = text.Split(new[] { ' ', '\n', '\t' }, StringSplitOptions.RemoveEmptyEntries).Length;
-        
+        var englishWords = text.Split(
+            new[] { ' ', '\n', '\t' }, StringSplitOptions.RemoveEmptyEntries).Length;
+
         return chineseChars + (int)(englishWords * 1.3);
     }
 }
