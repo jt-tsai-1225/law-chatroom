@@ -74,6 +74,24 @@ public class RAGSettings
     /// <summary>每次檢索取回的條文片段數。</summary>
     public int RetrievalTopK { get; set; } = 5;
 
+    /// <summary>
+    /// 是否把「可能已在快取中」的片段排到前面。
+    ///
+    /// 開啟的理由：LMCache 的 lookup 遇到第一個未命中的片段就停止，
+    /// 未命中的片段排在前面會讓後面已快取的片段全部作廢（驗證報告 8.3）。
+    ///
+    /// ⚠ 取捨：這會打亂 Qdrant 的相關度排序，把最相關的片段往後移。
+    /// 模型的答案會受片段位置影響（報告 8.5.5），因此正確性驗收時
+    /// 應該開、關各跑一次再決定。
+    /// </summary>
+    public bool ReorderByCacheStatus { get; set; } = true;
+
+    /// <summary>
+    /// 片段快取記錄的容量上限（以片段數計）。超過時淘汰最久未使用的。
+    /// 這份記錄只是樂觀估計，估錯的代價是少命中一些，不影響正確性。
+    /// </summary>
+    public int ChunkTrackerCapacity { get; set; } = 4096;
+
     // ── C# 層的回答快取 ────────────────────────────────────────────
     //
     // ⚠ 預設關閉，而且量測 CacheBlend 效果時務必保持關閉。

@@ -41,6 +41,9 @@ builder.Services.AddScoped<ILLMService, LLMService>();
 builder.Services.AddSingleton<ITokenizerClient, TokenizerClient>();
 builder.Services.AddScoped<IPromptBuilder, PromptBuilder>();
 
+// 記錄哪些片段送過，用來把已快取的片段排到前面（Singleton：跨請求共用才有意義）
+builder.Services.AddSingleton<IChunkCacheTracker, ChunkCacheTracker>();
+
 // Register LMcache service
 builder.Services.AddSingleton<LMCacheService>();
 builder.Services.AddScoped<ILMCacheService>(sp => sp.GetRequiredService<LMCacheService>());

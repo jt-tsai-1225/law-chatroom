@@ -37,6 +37,9 @@ public class ChatResponse
     /// <summary>CachedTokens / PromptTokens，百分比。</summary>
     public double CacheHitRate { get; set; }
 
-    /// <summary>本次回答實際引用的條文片段，供追溯來源。</summary>
+    /// <summary>本次回答實際送入模型的條文片段，順序即 prompt 中的順序。</summary>
     public List<string> RetrievedArticles { get; set; } = new();
+
+    /// <summary>本次是否依快取狀態重排過片段順序（見 RAGSettings.ReorderByCacheStatus）。</summary>
+    public bool ReorderedForCache { get; set; }
 }

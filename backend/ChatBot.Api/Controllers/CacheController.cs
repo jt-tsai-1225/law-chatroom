@@ -15,13 +15,16 @@ namespace ChatBot.Api.Controllers;
 public class CacheController : ControllerBase
 {
     private readonly ILMCacheService _cacheService;
+    private readonly IChunkCacheTracker _chunkTracker;
     private readonly ILogger<CacheController> _logger;
 
     public CacheController(
         ILMCacheService cacheService,
+        IChunkCacheTracker chunkTracker,
         ILogger<CacheController> logger)
     {
         _cacheService = cacheService;
+        _chunkTracker = chunkTracker;
         _logger = logger;
     }
 
@@ -53,6 +56,22 @@ public class CacheController : ControllerBase
         return Ok(new { message = "LMcache cleared successfully" });
     }
 
+    /// <summary>
+    /// 清空「片段已送出」的記錄。
+    ///
+    /// 量測用：推論引擎重啟後 KV 快取是空的，但這份記錄還留著舊資料，
+    /// 會把實際上沒命中的片段排到前面。做 A/B 量測前先呼叫這支。
+    /// </summary>
+    [HttpPost("chunks/clear")]
+    public ActionResult ClearChunkTracker()
+    {
+        var before = _chunkTracker.Count;
+        _chunkTracker.Clear();
+        _logger.LogInformation("片段快取記錄已透過 API 清空（原有 {N} 筆）", before);
+
+        return Ok(new { message = "chunk tracker cleared", clearedEntries = before });
+    }
+
     /// <summary>獲取所有快取統計資訊</summary>
     [HttpGet("stats")]
     public ActionResult<object> GetAllStats()
@@ -69,6 +88,10 @@ public class CacheController : ControllerBase
                 hitRate = Math.Round(lmcacheStats.HitRate, 2),
                 totalEntries = lmcacheStats.TotalEntries,
                 totalSizeBytes = lmcacheStats.TotalSizeBytes
+            },
+            chunkTracker = new
+            {
+                trackedChunks = _chunkTracker.Count
             }
         });
     }
