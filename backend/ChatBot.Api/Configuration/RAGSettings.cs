@@ -34,7 +34,16 @@ public class RAGSettings
     public string LlmApiKey { get; set; } = "";
 
     public string LlmModel { get; set; } = "mistralai/Mistral-7B-Instruct-v0.2";
-    public double LlmTemperature { get; set; } = 0.2;
+    /// <summary>
+    /// 取樣溫度，預設 0（貪婪解碼）。
+    ///
+    /// 為什麼不是 0.2：
+    ///   法律問答要的是可追溯、可重現的答案，同一個問題兩次應該得到同樣的回覆。
+    ///   非零溫度會讓輸出帶有抽樣隨機性，除了使用者體驗不一致之外，也會讓
+    ///   「比對 blend 與完全重算的答案是否相同」這類驗證無法進行——措辭抖動
+    ///   與 blend 造成的實質錯誤會混在一起，分不出是哪一個。
+    /// </summary>
+    public double LlmTemperature { get; set; } = 0;
     public int LlmMaxTokens { get; set; } = 1024;
     public int LlmTimeoutSeconds { get; set; } = 300;
 
