@@ -80,21 +80,58 @@ class ImportConfig:
 
 class PDFParser:
     """
-    使用 PyMuPDF (fitz) 解析 PDF 檔案
-    
-    支援：
-    - 繁體中文 PDF
-    - 提取法律條文結構（章、節、條）
-    - 保持原始排版結構
+    使用 PyMuPDF (fitz) 解析法規 PDF，切出可供檢索與快取的條文片段。
+
+    ── 為什麼整份重寫（2026/09/24）─────────────────────────────────
+    舊版的條號正則只認中文數字：
+
+        ARTICLE_PATTERN = re.compile(r"第[零一二三四五六七八九十百千万○]+條")
+
+    但全國法規資料庫匯出的 PDF，條號是「阿拉伯數字加空格」：
+
+        第 一 章 總則
+        第 1 條
+        1   本法所稱公司，謂以營利為目的……
+        第 2 條
+
+    造成兩個後果，且都是靜默發生的：
+
+      1. 真正的條號一個都沒被認出來，全部變成前一段的內文。
+      2. 被認出來的，全是內文裡的**交叉引用**——例如
+         「準用第二十九條第一項規定」「公司有第一百五十六條之四之情形者」。
+         腳本把這些引用當成新條文的開始，在句子中間切開，
+         並用「被引用的條號」當作該片段的標籤。
+
+    實測結果：公司法 533 條 + 民法 1,439 條，共 1,972 條，
+    舊版只產出 270 個片段，且標籤與內容全部對不上。
+
+    ── 這一版的作法 ───────────────────────────────────────────────
+      * 條號、章、節、目一律**整行比對**，交叉引用不會誤判
+      * 條號那一行保留在內文中，片段因此自帶條號，模型引用得出來，
+        快取鍵也與顯示內容一致（見下方 group_articles 的說明）
+      * 連續條文合併到約 500 字，對齊 LMCache 的 blend_min_tokens=256；
+        過短的片段不會走 blend，合併後才有快取效益
     """
-    
-    # 法律條文正則表達式
-    ARTICLE_PATTERN = re.compile(r"第[零一二三四五六七八九十百千万○]+條")
-    CHAPTER_PATTERN = re.compile(r"第[零一二三四五六七八九十百千万○]+章")
-    SECTION_PATTERN = re.compile(r"第[零一二三四五六七八九十百千万○]+節")
-    
-    def __init__(self, chunk_size: int = 500, chunk_overlap: int = 50):
-        self.chunk_size = chunk_size
+
+    # 條號：獨立成行，例如「第 1 條」「第 319-1 條」
+    # 中文數字的寫法也一併接受，但同樣要求整行，避免匹配到內文的交叉引用
+    ARTICLE_PATTERN = re.compile(
+        r"^第\s*(\d+(?:\s*-\s*\d+)?|[零一二三四五六七八九十百千○]+(?:\s*之\s*[零一二三四五六七八九十百千○]+)?)\s*條\s*$"
+    )
+    CHAPTER_PATTERN = re.compile(r"^第\s*([\d零一二三四五六七八九十百千○]+)\s*章\s*(.*)$")
+    SECTION_PATTERN = re.compile(r"^第\s*([\d零一二三四五六七八九十百千○]+)\s*節\s*(.*)$")
+    ITEM_PATTERN = re.compile(r"^第\s*([\d零一二三四五六七八九十百千○]+)\s*目\s*(.*)$")
+    # 法規名稱：公司法
+    LAW_NAME_PATTERN = re.compile(r"^法規名稱[：:]\s*(.+)$")
+
+    # 片段長度（字元）。500 字的中文約 500～600 tokens，穩定高於 blend_min_tokens=256
+    TARGET_CHARS = 500
+    MIN_CHARS = 300
+
+    def __init__(self, chunk_size: int = TARGET_CHARS, chunk_overlap: int = 0):
+        # chunk_overlap 保留只為相容既有呼叫端；條文是自然邊界，重疊沒有意義，
+        # 而且會讓同一段文字出現在兩個片段裡，產生兩個不同的快取鍵。
+        self.chunk_size = chunk_size or self.TARGET_CHARS
         self.chunk_overlap = chunk_overlap
         self._fitz = None
         try:
@@ -102,169 +139,221 @@ class PDFParser:
             self._fitz = fitz
         except ImportError:
             raise ImportError("請安裝 pymupdf: pip install pymupdf")
-    
+
+    # ------------------------------------------------------------------
+    # 對外介面
+    # ------------------------------------------------------------------
+
     def parse_pdf(self, pdf_path: str) -> list[dict]:
-        """
-        解析 PDF 檔案並返回結構化的法律條文列表
-        
-        Args:
-            pdf_path: PDF 檔案路徑
-            
-        Returns:
-            包含字典的列表，每個字典有:
-            - id: 唯一識別碼
-            - title: 文件標題
-            - content: 條文內容
-            - chapter: 章節
-            - section: 節
-            - article: 條文號碼
-            - page: 頁碼
-        """
+        """解析 PDF，回傳合併後的條文片段列表。"""
+        doc = self._fitz.open(pdf_path)
         try:
-            doc = self._fitz.open(pdf_path)
-        except Exception as e:
-            logger.error(f"無法開啟 PDF 檔案: {pdf_path}, 錯誤: {e}")
+            raw_lines = []
+            for page in doc:
+                raw_lines.extend(page.get_text().split("\n"))
+        finally:
+            doc.close()
+
+        lines = [ln.strip() for ln in raw_lines]
+        title = self._extract_title(lines, pdf_path)
+        articles = self._extract_articles(lines)
+
+        if not articles:
+            logger.warning(f"{pdf_path} 沒有解析到任何條文，請檢查 PDF 格式")
             return []
-        
-        logger.info(f"正在解析 PDF: {pdf_path} ({len(doc)} 頁)")
-        
-        # 提取所有頁面的文字
-        full_text = ""
-        for page_num in range(len(doc)):
-            page = doc[page_num]
-            text = page.get_text("text")
-            full_text += f"\n--- PAGE {page_num + 1} ---\n{text}"
-        
-        doc.close()
-        
-        # 從文字中提取結構化的法律條文
-        documents = self._extract_legal_articles(full_text, pdf_path)
-        
-        logger.info(f"從 {os.path.basename(pdf_path)} 提取了 {len(documents)} 個條文")
-        
-        return documents
-    
-    def _extract_legal_articles(self, content: str, pdf_path: str) -> list[dict]:
+
+        chunks = self._group_articles(articles, title)
+
+        logger.info(
+            f"{os.path.basename(pdf_path)}：解析到 {len(articles)} 條，"
+            f"合併為 {len(chunks)} 個片段"
+        )
+        return chunks
+
+    # ------------------------------------------------------------------
+    # 內部：逐行掃描
+    # ------------------------------------------------------------------
+
+    def _extract_articles(self, lines: list[str]) -> list[dict]:
         """
-        從 PDF 文字內容中提取結構化的法律條文
+        逐行掃描，切出單一條文。
+
+        回傳的每一筆是「一條」，尚未合併；合併交給 _group_articles。
         """
-        documents = []
-        lines = content.split('\n')
-        
-        current_chapter = ""
-        current_section = ""
-        current_article = ""
-        current_content_lines = []
-        
-        title = self._extract_title(pdf_path)
-        
+        articles: list[dict] = []
+        chapter = section = item = ""
+        current: Optional[dict] = None
+
+        def flush():
+            nonlocal current
+            if current and current["body"]:
+                current["text"] = "\n".join([current["header"]] + current["body"]).strip()
+                del current["body"]
+                articles.append(current)
+            current = None
+
         for line in lines:
-            line = line.strip()
-            if not line or line.startswith("--- PAGE"):
+            if not line:
                 continue
-            
-            # 偵測章節
-            chapter_match = self.CHAPTER_PATTERN.search(line)
-            if chapter_match:
-                # 保存前一個條文
-                if current_article and current_content_lines:
-                    doc = self._create_document(title, current_chapter, current_section, 
-                                               current_article, current_content_lines)
-                    documents.append(doc)
-                
-                current_chapter = line
-                current_section = ""
-                current_article = ""
-                current_content_lines = []
+
+            m = self.CHAPTER_PATTERN.match(line)
+            if m:
+                flush()
+                chapter = line
+                section = item = ""
                 continue
-            
-            # 偵測節
-            section_match = self.SECTION_PATTERN.search(line)
-            if section_match:
-                # 保存前一個條文
-                if current_article and current_content_lines:
-                    doc = self._create_document(title, current_chapter, current_section, 
-                                               current_article, current_content_lines)
-                    documents.append(doc)
-                
-                current_section = line
-                current_article = ""
-                current_content_lines = []
+
+            m = self.SECTION_PATTERN.match(line)
+            if m:
+                flush()
+                section = line
+                item = ""
                 continue
-            
-            # 偵測條文
-            article_match = self.ARTICLE_PATTERN.search(line)
-            if article_match:
-                # 保存前一個條文
-                if current_article and current_content_lines:
-                    doc = self._create_document(title, current_chapter, current_section, 
-                                               current_article, current_content_lines)
-                    documents.append(doc)
-                
-                current_article = line
-                current_content_lines = []
+
+            m = self.ITEM_PATTERN.match(line)
+            if m:
+                flush()
+                item = line
                 continue
-            
-            # 如果是內容行且當前有條文，添加到內容
-            if current_article and line:
-                current_content_lines.append(line)
-        
-        # 保存最後一個條文
-        if current_article and current_content_lines:
-            doc = self._create_document(title, current_chapter, current_section, 
-                                       current_article, current_content_lines)
-            documents.append(doc)
-        
-        # 如果沒有找到結構化條文，將整個文件作為一個 chunk
-        if not documents and content:
-            documents.append({
-                "id": self._generate_id(content[:100]),
-                "title": title,
-                "content": content[:5000],  # 限制長度
-                "chapter": "全文",
-                "section": "",
-                "article": "",
-            })
-        
-        return documents
-    
-    def _create_document(self, title: str, chapter: str, section: str, 
-                         article: str, content_lines: list[str]) -> dict:
-        """創建一個法律條文文檔"""
-        content = '\n'.join(content_lines).strip()
-        
-        # 提取條文號碼（例如 "第一條" -> "第一條"）
-        article_num = ""
-        match = re.search(r"(第[零一二三四五六七八九十百千万○]+條)", article)
-        if match:
-            article_num = match.group(1)
-        
-        chapter_info = chapter if chapter else ""
-        section_info = section if section else ""
-        
-        if section_info:
-            chapter_section = f"{chapter_info}/{section_info}"
-        else:
-            chapter_section = chapter_info
-        
+
+            m = self.ARTICLE_PATTERN.match(line)
+            if m:
+                flush()
+                current = {
+                    "number": self._normalize_article_number(m.group(1)),
+                    "header": line,
+                    "body": [],
+                    "chapter": chapter,
+                    "section": section,
+                    "item": item,
+                }
+                continue
+
+            if current is not None:
+                current["body"].append(line)
+
+        flush()
+        return articles
+
+    @staticmethod
+    def _normalize_article_number(raw: str) -> str:
+        """把「319 - 1」之類的寫法正規化成「319-1」。"""
+        return re.sub(r"\s+", "", raw)
+
+    # ------------------------------------------------------------------
+    # 內部：合併成片段
+    # ------------------------------------------------------------------
+
+    def _group_articles(self, articles: list[dict], title: str) -> list[dict]:
+        """
+        把連續的條文合併到約 TARGET_CHARS 字。
+
+        為什麼要合併：
+          單一條文平均只有一百多字，低於 LMCache 的 blend_min_tokens（預設 256），
+          那樣的片段不會走 blend，快取等於沒有作用。合併到 500 字左右，
+          與 CacheBlend 驗證報告第八節所用的語料顆粒度一致。
+
+        為什麼不跨章節合併：
+          章節是語意邊界，跨章合併會讓檢索回來的片段包含不相關的條文，
+          既稀釋相關度，也讓 prompt 變長。
+
+        ★ 片段文字就是快取鍵的來源 ★
+          合併後的 text 已包含條號那一行，後端不需要、也不應該再在前面
+          補上標籤——任何隨位置變動的前綴（例如「[資料 1]」）都會讓同一條
+          條文在不同次檢索算出不同的快取鍵。
+        """
+        chunks: list[dict] = []
+        buf: list[dict] = []
+
+        def buf_chars() -> int:
+            return sum(len(a["text"]) for a in buf)
+
+        def flush():
+            nonlocal buf
+            if not buf:
+                return
+            chunks.append(self._make_chunk(buf, title))
+            buf = []
+
+        prev_scope = None
+        for art in articles:
+            scope = (art["chapter"], art["section"], art["item"])
+            if prev_scope is not None and scope != prev_scope:
+                flush()
+            prev_scope = scope
+
+            buf.append(art)
+            if buf_chars() >= self.chunk_size:
+                flush()
+
+        flush()
+
+        # 章節尾端可能留下過短的片段，往前合併（同章節才合併）
+        merged: list[dict] = []
+        for chunk in chunks:
+            if (
+                merged
+                and len(chunk["content"]) < self.MIN_CHARS
+                and merged[-1]["chapter"] == chunk["chapter"]
+                and merged[-1]["section"] == chunk["section"]
+            ):
+                prev = merged[-1]
+                prev["content"] = prev["content"] + "\n" + chunk["content"]
+                prev["articles"] = prev["articles"] + chunk["articles"]
+                prev["article"] = self._format_label(prev["articles"])
+                prev["n_chars"] = len(prev["content"])
+                prev["id"] = self._generate_id(
+                    f"{prev['title']}-{prev['article']}-{prev['content'][:50]}"
+                )
+            else:
+                merged.append(chunk)
+
+        return merged
+
+    def _make_chunk(self, arts: list[dict], title: str) -> dict:
+        content = "\n".join(a["text"] for a in arts)
+        numbers = [a["number"] for a in arts]
+        label = self._format_label(numbers)
+        first = arts[0]
+
+        chapter_section = first["chapter"]
+        if first["section"]:
+            chapter_section = f"{chapter_section}/{first['section']}" if chapter_section else first["section"]
+
         return {
-            "id": self._generate_id(f"{title}-{article_num}-{content[:50]}"),
+            "id": self._generate_id(f"{title}-{label}-{content[:50]}"),
             "title": title,
             "content": content,
             "chapter": chapter_section,
-            "section": section_info,
-            "article": article_num,
+            "section": first["section"],
+            "article": label,
+            "articles": numbers,
+            "n_chars": len(content),
         }
-    
-    def _extract_title(self, pdf_path: str) -> str:
-        """從 PDF 檔案名提取標題"""
-        filename = os.path.basename(pdf_path)
-        # 移除副檔名
-        name_without_ext = os.path.splitext(filename)[0]
-        # 替換常見分隔符
-        title = name_without_ext.replace("_", " ").replace("-", " ")
-        return title if title else "未知文件"
-    
+
+    @staticmethod
+    def _format_label(numbers: list[str]) -> str:
+        """['292','293','295'] → '第 292、293、295 條'"""
+        if not numbers:
+            return ""
+        if len(numbers) == 1:
+            return f"第 {numbers[0]} 條"
+        return "第 " + "、".join(numbers) + " 條"
+
+    # ------------------------------------------------------------------
+    # 內部：雜項
+    # ------------------------------------------------------------------
+
+    def _extract_title(self, lines: list[str], pdf_path: str) -> str:
+        """優先讀 PDF 內的「法規名稱：」，讀不到才退回檔名。"""
+        for line in lines[:20]:
+            m = self.LAW_NAME_PATTERN.match(line)
+            if m:
+                return m.group(1).strip()
+
+        name = os.path.splitext(os.path.basename(pdf_path))[0]
+        return name.replace("_", " ").replace("-", " ") or "未知文件"
+
     def _generate_id(self, text: str) -> int:
         """生成唯一的 ID (使用整數)"""
         return int(hashlib.md5(text.encode("utf-8")).hexdigest()[:16], 16)
@@ -385,17 +474,17 @@ class QdrantService:
             # 創建 payload 索引
             self.client.create_payload_index(
                 collection_name=collection_name,
-                field_name="ArticleNumber",
+                field_name="articleNumber",
                 field_schema=PayloadSchemaType.KEYWORD,
             )
             self.client.create_payload_index(
                 collection_name=collection_name,
-                field_name="Chapter",
+                field_name="chapter",
                 field_schema=PayloadSchemaType.KEYWORD,
             )
             self.client.create_payload_index(
                 collection_name=collection_name,
-                field_name="Domain",
+                field_name="domain",
                 field_schema=PayloadSchemaType.KEYWORD,
             )
             
@@ -562,9 +651,13 @@ class LegalPDFImporter:
                 vector=embedding,
                 payload={
                     "title": doc["title"],
+                    # content 已包含條號那一行，後端直接拿它當片段文字與快取鍵，
+                    # 不可再於前面補上任何隨位置變動的標記（見 PDFParser 的說明）
                     "content": content,
                     "chapter": doc.get("chapter", ""),
                     "articleNumber": doc.get("article", ""),
+                    "articles": doc.get("articles", []),
+                    "nChars": doc.get("n_chars", len(content)),
                     "domain": domain,
                     "sourceFile": os.path.basename(pdf_path),
                 },
@@ -805,7 +898,7 @@ def main():
         collection_name=args.collection,
         embedding_endpoint=args.embedding_endpoint,
         embedding_model=args.embedding_model,
-        embedding_api_key=args.embedding_api_key,
+        embedding_api_key=embedding_api_key,   # 已含 .env / 環境變數的後備
     )
     
     # 執行操作

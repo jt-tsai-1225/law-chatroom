@@ -22,17 +22,19 @@ public sealed class RetrievedChunk
     public string Label => string.IsNullOrEmpty(ArticleNumber) ? "(無條號)" : ArticleNumber;
 
     /// <summary>
-    /// 組出實際送進模型的片段文字。
+    /// 實際送進模型的片段文字。
     ///
-    /// ★ 這個組法就是快取鍵的來源，必須全系統一致 ★
-    /// CacheBlend 以片段的 token id 內容雜湊作為鍵，只要這裡多一個空白、
+    /// ★ 這就是快取鍵的來源，必須與 Qdrant 中儲存的內容逐字相同 ★
+    /// CacheBlend 以片段的 token id 內容雜湊作為鍵。只要這裡多一個空白、
     /// 換行位置不同，或加上「[資料 1]」這種**隨位置改變**的標記，
     /// 同一條條文在不同次檢索就會算出不同的鍵，永遠不會命中。
     ///
-    /// 匯入腳本若要預先算 token id，必須用完全相同的組法。
+    /// 因此這裡直接回傳 Content，不做任何加工——匯入腳本
+    /// （import_legal_pdfs.py 的 PDFParser）已經把條號那一行放進內容裡，
+    /// 片段本身就帶著「第 293 條」，模型引用得出來，不需要外部再補標籤。
+    /// ArticleNumber 只作為顯示與追溯用途，不參與快取鍵。
     /// </summary>
-    public string ComposeSegmentText()
-        => string.IsNullOrEmpty(ArticleNumber) ? Content : $"{ArticleNumber}\n{Content}";
+    public string ComposeSegmentText() => Content;
 }
 
 public sealed class BuiltPrompt

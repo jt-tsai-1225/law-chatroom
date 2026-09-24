@@ -87,3 +87,6 @@ Thumbs.db
 desktop.ini
 *.swp
 *~
+# Python
+__pycache__/
+*.py[cod]

@@ -34,10 +34,18 @@ public class PDFParser : IPDFParser
         var documents = new List<KnowledgeDocument>();
         var lines = content.Split('\n', StringSplitOptions.RemoveEmptyEntries);
 
-        // 法律條文正則表達式 (例如: "第壹條", "第一條", "第1條", "第壹百條")
-        var articlePattern = @"第[零一二三四五六七八九十百千万○]+[條条]";
-        var chapterPattern = @"第[零一二三四五六七八九十百千万○]+[章]";
-        var sectionPattern = @"第[零一二三四五六七八九十百千万○]+[節]";
+        // 法律條文正則表達式。
+        //
+        // 必須整行比對（^...$），否則會把內文裡的**交叉引用**誤判為新條文的開始：
+        //   「準用第二十九條第一項規定」「公司有第一百五十六條之四之情形者」
+        // 這些都不是條號，卻會讓片段在句子中間被切開，並被標上錯誤的條號。
+        //
+        // 另外條號實際的寫法是阿拉伯數字加空格（「第 1 條」「第 319-1 條」），
+        // 只認中文數字會導致真正的條號一個都抓不到。
+        // 詳見 import_legal_pdfs.py 中 PDFParser 的說明。
+        var articlePattern = @"^第\s*(\d+(?:\s*-\s*\d+)?|[零一二三四五六七八九十百千○]+)\s*[條条]\s*$";
+        var chapterPattern = @"^第\s*[\d零一二三四五六七八九十百千○]+\s*[章]";
+        var sectionPattern = @"^第\s*[\d零一二三四五六七八九十百千○]+\s*[節]";
         
         var currentArticle = string.Empty;
         var currentContent = new StringBuilder();
