@@ -14,6 +14,16 @@ public class ProbeRequest
     /// 例如 ["293", "305", "310"] 會依序帶入包含這些條文的片段。
     /// </summary>
     public List<string> Articles { get; set; } = new();
+
+    /// <summary>
+    /// 法典名稱，例如「公司法」或「民法」。會比對片段的 title。
+    ///
+    /// 為什麼幾乎一定要給：民法 1,439 條、公司法 533 條，條號大量重疊。
+    /// 只給條號會抓到哪一部法典是不確定的——實測曾經整組抓到民法，
+    /// 卻拿去回答公司重整的問題。留空時若某個條號在多部法典都存在，
+    /// 本端點會直接回報錯誤而不是任選一個。
+    /// </summary>
+    public string? Law { get; set; }
 }
 
 /// <summary>
@@ -57,11 +67,14 @@ public class DiagnosticsController : ControllerBase
     /// contains 可篩選標籤或章節，例如 ?contains=重整
     /// </summary>
     [HttpGet("chunks")]
-    public async Task<ActionResult<object>> ListChunks([FromQuery] string? contains = null)
+    public async Task<ActionResult<object>> ListChunks(
+        [FromQuery] string? contains = null,
+        [FromQuery] string? law = null)
     {
         var all = await _qdrant.ScrollAllAsync(Collection);
 
         var rows = all
+            .Where(c => string.IsNullOrEmpty(law) || (c.Title ?? "").Contains(law))
             .Where(c => string.IsNullOrEmpty(contains)
                         || (c.ArticleNumber ?? "").Contains(contains)
                         || (c.Chapter ?? "").Contains(contains)
@@ -78,7 +91,15 @@ public class DiagnosticsController : ControllerBase
             })
             .ToList();
 
-        return Ok(new { total = all.Count, matched = rows.Count, chunks = rows });
+        return Ok(new
+        {
+            total = all.Count,
+            matched = rows.Count,
+            laws = all.GroupBy(c => c.Title)
+                      .Select(g => new { law = g.Key, chunks = g.Count() })
+                      .OrderBy(x => x.law),
+            chunks = rows
+        });
     }
 
     /// <summary>
@@ -99,16 +120,44 @@ public class DiagnosticsController : ControllerBase
 
         var all = await _qdrant.ScrollAllAsync(Collection);
 
+        var pool = string.IsNullOrWhiteSpace(request.Law)
+            ? all
+            : all.Where(c => (c.Title ?? "").Contains(request.Law!)).ToList();
+
+        if (pool.Count == 0)
+        {
+            var laws = all.Select(c => c.Title).Distinct().OrderBy(x => x).ToList();
+            return BadRequest(new { error = $"找不到法典「{request.Law}」的片段", availableLaws = laws });
+        }
+
         // 依 request 給的順序挑片段。同一個片段被指到兩次就只取第一次，
         // 因為重複的片段對快取沒有意義，而且會讓 token 數難以對照。
         var chosen = new List<RetrievedChunk>();
+        var chosenTitles = new List<string>();
         var usedLabels = new HashSet<string>();
         var notFound = new List<string>();
 
         foreach (var wanted in request.Articles)
         {
             var key = wanted.Trim();
-            var hit = all.FirstOrDefault(c => ParseArticleNumbers(c.ArticleNumber).Contains(key));
+            var candidates = pool
+                .Where(c => ParseArticleNumbers(c.ArticleNumber).Contains(key))
+                .ToList();
+
+            // 沒指定法典、而該條號跨法典重複時，寧可報錯也不要任選一個——
+            // 靜默選錯會產生「看起來像在測 blend、其實在測錯的語料」的結果。
+            var distinctTitles = candidates.Select(c => c.Title).Distinct().ToList();
+            if (distinctTitles.Count > 1)
+            {
+                return BadRequest(new
+                {
+                    error = $"條號 {key} 在多部法典中都存在，請指定 law",
+                    article = key,
+                    candidates = distinctTitles
+                });
+            }
+
+            var hit = candidates.FirstOrDefault();
 
             if (hit is null)
             {
@@ -127,6 +176,7 @@ public class DiagnosticsController : ControllerBase
                 ArticleNumber = hit.ArticleNumber ?? "",
                 Content = hit.Content
             });
+            chosenTitles.Add(hit.Title ?? "");
         }
 
         if (chosen.Count == 0)
@@ -146,6 +196,7 @@ public class DiagnosticsController : ControllerBase
             segments.Add(new
             {
                 position = i + 1,
+                law = chosenTitles[i],
                 label = chosen[i].Label,
                 offset = prompt.ChunkOffsets[i],
                 tokens = prompt.ChunkTokenCounts[i]
@@ -155,6 +206,7 @@ public class DiagnosticsController : ControllerBase
         return Ok(new
         {
             question = request.Question,
+            laws = chosenTitles.Distinct().ToList(),
             order = chosen.Select(c => c.Label).ToList(),
             notFound,
             promptTokens = result.PromptTokens,
