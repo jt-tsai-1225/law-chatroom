@@ -44,6 +44,12 @@ public sealed class BuiltPrompt
 
     /// <summary>各片段在 prompt 中的起始位置（不含分隔符），供除錯與命中率驗證使用。</summary>
     public required IReadOnlyList<int> ChunkOffsets { get; init; }
+
+    /// <summary>各片段的 token 數，順序與 ChunkOffsets 相同。</summary>
+    public required IReadOnlyList<int> ChunkTokenCounts { get; init; }
+
+    /// <summary>prompt 開頭的固定部分（BOS + [INST] + 系統提示詞）的 token 數。</summary>
+    public required int PrefixTokens { get; init; }
 }
 
 /// <summary>
@@ -107,6 +113,8 @@ public class PromptBuilder : IPromptBuilder
         ids.AddRange(systemTokens);
 
         var offsets = new List<int>(chunks.Count);
+        var counts = new List<int>(chunks.Count);
+        var prefixTokens = ids.Count;
 
         foreach (var chunk in chunks)
         {
@@ -124,6 +132,7 @@ public class PromptBuilder : IPromptBuilder
 
             ids.AddRange(separator);
             offsets.Add(ids.Count);
+            counts.Add(chunkTokens.Length);
             ids.AddRange(chunkTokens);
         }
 
@@ -140,7 +149,9 @@ public class PromptBuilder : IPromptBuilder
         {
             Tokens = ids.ToArray(),
             ChunkCount = chunks.Count,
-            ChunkOffsets = offsets
+            ChunkOffsets = offsets,
+            ChunkTokenCounts = counts,
+            PrefixTokens = prefixTokens
         };
     }
 }

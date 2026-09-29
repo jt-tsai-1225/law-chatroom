@@ -17,6 +17,13 @@ public interface IQdrantService
     Task<List<(KnowledgeSearchResult Result, double Score)>> SearchSimilarAsync(
         string collectionName, float[] queryVector, int topK = 5);
     Task DeleteDocumentAsync(string collectionName, string documentId);
+
+    /// <summary>
+    /// 取回集合中的所有片段（不做向量搜尋）。供診斷端點指定片段與順序使用。
+    /// 目前語料僅 327 筆，全部載入的成本可忽略，因此不做分頁與過濾。
+    /// </summary>
+    Task<List<KnowledgeSearchResult>> ScrollAllAsync(
+        string collectionName = "legal_documents", int limit = 2000);
     Task<bool> CollectionExistsAsync(string collectionName);
     Task CreateCollectionAsync(string collectionName, int vectorSize = 1536);
     Task TruncateCollectionAsync(string collectionName);
@@ -134,6 +141,29 @@ public class QdrantService : IQdrantService
             return string.Empty;
 
         return payloadValue.StringValue ?? string.Empty;
+    }
+
+    public async Task<List<KnowledgeSearchResult>> ScrollAllAsync(
+        string collectionName = "legal_documents", int limit = 2000)
+    {
+        var response = await _client.ScrollAsync(
+            collectionName: collectionName,
+            limit: (uint)limit);
+
+        var list = response.Result
+            .Select(p => new KnowledgeSearchResult
+            {
+                Id = p.Id.ToString(),
+                Content = ExtractPayloadValue(p.Payload, "content"),
+                Title = ExtractPayloadValue(p.Payload, "title"),
+                Chapter = ExtractPayloadValue(p.Payload, "chapter"),
+                ArticleNumber = ExtractPayloadValue(p.Payload, "articleNumber"),
+                Score = 0
+            })
+            .ToList();
+
+        _logger.LogInformation("[QdrantService] ScrollAll 取回 {Count} 個片段", list.Count);
+        return list;
     }
 
     public async Task DeleteDocumentAsync(string collectionName, string documentId)
