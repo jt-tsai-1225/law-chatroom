@@ -37,5 +37,12 @@ services:
       - "6333:6333"
       - "6334:6334"
     volumes:
-      - ./qdrant_storage:/qdrant/storage
+      # 不可掛 ./qdrant_storage —— 那會把資料庫檔案寫進 git 儲存庫裡，
+      # 造成 git status 永遠是髒的，而且 git pull / checkout 會在資料庫
+      # 運行中改寫檔案導致損毀。改用 docker 管理的具名 volume。
+      # 要指定主機路徑時，設環境變數 QDRANT_STORAGE 並改成 bind mount。
+      - qdrant_data:/qdrant/storage
     restart: unless-stopped
+
+volumes:
+  qdrant_data:

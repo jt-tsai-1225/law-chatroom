@@ -90,3 +90,13 @@ desktop.ini
 # Python
 __pycache__/
 *.py[cod]
+
+# ============ 執行期資料（不可進版控）============
+# Qdrant 的資料庫檔案。曾經被追蹤了 177 個檔案，會造成兩個問題：
+#   1. Qdrant 持續寫入 → git status 永遠是髒的、每次都有大量二進位 diff
+#   2. git pull / checkout 會在資料庫運行中改寫這些檔案 → 資料損毀
+# 正式部署時這個目錄應該放在儲存庫之外（例如 ~/qdrant_storage）。
+qdrant_storage/
+
+# 後端上傳暫存
+backend/ChatBot.Api/uploads/
