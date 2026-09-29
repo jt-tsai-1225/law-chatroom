@@ -65,7 +65,9 @@ public sealed class BuiltPrompt
 /// 兩個硬性要求（來源：CacheBlend 驗證報告 12.5）：
 ///   1. 分隔符必須以 token id 插入（本模型為 [422, 422]），不可用字串串接。
 ///      字串串接會讓分隔符與相鄰文字合併成不同的 token，片段邊界就對不上。
-///   2. 每個片段長度需大於 blend_min_tokens（預設 256），否則該片段不走 blend。
+///   2. 片段不宜過短。注意：LMCache 的 blend_min_tokens 是未實作的設定，
+///      並不存在「低於門檻就不走 blend」這回事（見 RAGSettings.ChunkWarnMinTokens）。
+///      過短的真正代價是片段數變多，而 lookup 遇到第一個未命中片段就會停止。
 /// </summary>
 public interface IPromptBuilder
 {
@@ -122,12 +124,15 @@ public class PromptBuilder : IPromptBuilder
                 ?? await _tokenizer.TokenizeCachedAsync(
                         chunk.ComposeSegmentText(), false, cancellationToken);
 
-            if (chunkTokens.Length < _settings.BlendMinTokens)
+            if (chunkTokens.Length < _settings.ChunkWarnMinTokens)
             {
+                // 這只是提醒，不代表該片段不會被快取——短片段一樣會。
+                // 問題在於片段數變多後，lookup 更容易在前面踩到未命中而中斷。
                 _logger.LogWarning(
-                    "片段「{Label}」只有 {Len} tokens，低於 blend_min_tokens={Min}，" +
-                    "這一段不會走 blend（匯入時的分組顆粒度可能過細）",
-                    chunk.Label, chunkTokens.Length, _settings.BlendMinTokens);
+                    "片段「{Label}」只有 {Len} tokens（低於 {Min}）。短片段會使片段數增加，" +
+                    "而 lookup 遇到第一個未命中片段即停止，命中率因此更容易受損。" +
+                    "可考慮在匯入時與鄰近條文合併",
+                    chunk.Label, chunkTokens.Length, _settings.ChunkWarnMinTokens);
             }
 
             ids.AddRange(separator);

@@ -57,10 +57,18 @@ public class RAGSettings
     public string BlendSeparator { get; set; } = "# #";
 
     /// <summary>
-    /// 對應 LMCache 的 blend_min_tokens（預設 256）。短於此值的片段不會走 blend，
-    /// 僅用於在組 prompt 時發出警告，提醒匯入的分組顆粒度過細。
+    /// 片段長度的警告門檻，單位為 token。低於此值只會記一行警告，不影響行為。
+    ///
+    /// ⚠ 名稱沿用自 LMCache 的 blend_min_tokens，但**那是一個未實作的設定**：
+    ///   查證 v0.5.1、v0.5.5、main 三個版本的全部檔案，該參數只出現在
+    ///   config.py 的定義與使用統計回報中，沒有任何一行程式碼讀它來做判斷。
+    ///   因此不存在「片段短於 256 就不走 blend」這回事——再短的片段一樣會被快取。
+    ///
+    /// 那為什麼還要警告？片段過短的真正代價是**片段數變多**。LMCache 的 lookup
+    /// 逐段往後走，遇到第一個未命中的片段就停止（驗證報告 8.3、14.3），
+    /// 片段越多，越容易在前面踩到一個沒看過的而讓後面全部作廢。
     /// </summary>
-    public int BlendMinTokens { get; set; } = 256;
+    public int ChunkWarnMinTokens { get; set; } = 256;
 
     /// <summary>Mistral-7B-Instruct 的 BOS + [INST]。換模型時必須一併更換。</summary>
     public int[] InstPrefixTokens { get; set; } = { 1, 733, 16289, 28793 };
