@@ -92,7 +92,34 @@ public class ChatBotService : IChatBotService
             chunks.Count, string.Join("、", chunks.Select(c => c.Label)));
 
         chunks = Deduplicate(chunks);
-        var (ordered, reordered) = ReorderCachedFirst(chunks);
+
+        // 第 ③ 步：決定片段順序。
+        // 正常情況走 ReorderCachedFirst；"asis" 與 "reverse" 是驗證用的覆寫，
+        // 只影響順序，不影響片段組合，因此可以乾淨地隔離「順序」這個變因。
+        var mode = (request.ChunkOrder ?? "default").Trim().ToLowerInvariant();
+        List<RetrievedChunk> ordered;
+        bool reordered;
+
+        switch (mode)
+        {
+            case "asis":
+                ordered = chunks;
+                reordered = false;
+                break;
+
+            case "reverse":
+                ordered = Enumerable.Reverse(chunks).ToList();
+                reordered = false;
+                _logger.LogInformation(
+                    "片段順序已倒轉（chunkOrder=reverse）→ {Order}",
+                    string.Join("、", ordered.Select(c => c.Label)));
+                break;
+
+            default:
+                mode = "default";
+                (ordered, reordered) = ReorderCachedFirst(chunks);
+                break;
+        }
 
         var prompt = await _promptBuilder.BuildAsync(ordered, request.Message, cancellationToken);
         var llmResult = await _llmService.GenerateFromTokensAsync(prompt.Tokens, cancellationToken);
@@ -119,7 +146,8 @@ public class ChatBotService : IChatBotService
             CachedTokens = llmResult.CachedTokens,
             CacheHitRate = llmResult.CacheHitRate,
             RetrievedArticles = ordered.Select(c => c.Label).ToList(),
-            ReorderedForCache = reordered
+            ReorderedForCache = reordered,
+            ChunkOrderApplied = mode
         };
     }
 
