@@ -83,7 +83,16 @@ public class SeaweedObjectStorage : IObjectStorage
                 ? "application/octet-stream"
                 : contentType,
             AutoCloseStream = false,
-            DisablePayloadSigning = true
+
+            // SDK 預設會用 aws-chunked 串流簽章送出內容（分塊、每塊各自簽名）。
+            // SeaweedFS 的 S3 閘道對那個模式支援不完整，簽章驗不過。
+            // 關掉之後改送一般的請求本體、並以整份內容的 SHA256 簽名，
+            // 那是相容實作普遍都吃的形式。
+            //
+            // 曾經改用 DisablePayloadSigning=true 想繞過，那反而更糟——
+            // 它會產生 UNSIGNED-PAYLOAD／STREAMING-…-TRAILER 之類的變體，
+            // SeaweedFS 同樣不認。
+            UseChunkEncoding = false
         }, ct);
 
         _logger.LogInformation(
@@ -150,7 +159,14 @@ public class SeaweedObjectStorage : IObjectStorage
 
             try
             {
-                await _s3.GetBucketLocationAsync(_bucket, ct);
+                // 用「列出一個物件」來確認 bucket 可用，而不是 GetBucketLocation。
+                //
+                // GetBucketLocation 走的是 `?location` 這個子資源，S3 相容實作
+                // 對它的支援參差不齊；ListObjectsV2 則是最基本的 bucket 讀取操作，
+                // 與 `curl --aws-sigv4 GET /law-documents/` 是同一回事，
+                // 而那個在 SeaweedFS 上實測可通。
+                await _s3.ListObjectsV2Async(
+                    new ListObjectsV2Request { BucketName = _bucket, MaxKeys = 1 }, ct);
             }
             catch (AmazonS3Exception ex) when (
                 ex.StatusCode == System.Net.HttpStatusCode.NotFound ||
@@ -158,6 +174,13 @@ public class SeaweedObjectStorage : IObjectStorage
             {
                 _logger.LogInformation("bucket {Bucket} 不存在，建立中", _bucket);
                 await _s3.PutBucketAsync(new PutBucketRequest { BucketName = _bucket }, ct);
+            }
+            catch (AmazonS3Exception ex)
+            {
+                // 簽章、權限一類的失敗要講清楚是卡在哪一步，
+                // 否則錯誤訊息會與上傳本身的失敗混在一起難以區分。
+                throw new InvalidOperationException(
+                    $"無法存取 bucket {_bucket}（S3 回應 {ex.StatusCode}／{ex.ErrorCode}）：{ex.Message}", ex);
             }
 
             _bucketReady = true;
