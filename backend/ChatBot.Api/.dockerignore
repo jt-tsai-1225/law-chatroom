@@ -1,0 +1,13 @@
+# 這些必須排除：Dockerfile 先複製 csproj 做 restore，再 COPY . . 帶入原始碼。
+# 若把宿主機建置產生的 bin/obj 一併複製進去，會覆蓋掉映像內剛還原好的
+# obj/project.assets.json，--no-restore 的 publish 就會失敗或用到錯的相依。
+# 這些目錄裡的路徑也是宿主機的絕對路徑，在容器內一律無效。
+bin/
+obj/
+**/bin/
+**/obj/
+
+.vs/
+.vscode/
+*.user
+uploads/

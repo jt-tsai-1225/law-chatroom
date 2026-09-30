@@ -109,6 +109,36 @@ public class RAGSettings
     /// </summary>
     public int ChunkTrackerCapacity { get; set; } = 4096;
 
+    // ── 文件匯入 ───────────────────────────────────────────────────
+
+    /// <summary>
+    /// 解析腳本的位置。相對路徑以應用程式根目錄為基準。
+    ///
+    /// 為什麼解析走外部腳本而非 C#：見 LegalDocumentParser 的說明——
+    /// 那份 Python 實作是唯一經過實測的版本，重寫等於重新承擔一次
+    /// 靜默切壞的風險。
+    /// </summary>
+    public string ParserScriptPath { get; set; } = "tools/parse_pdf.py";
+
+    /// <summary>直譯器名稱。容器內為 python3。</summary>
+    public string PythonExecutable { get; set; } = "python3";
+
+    /// <summary>
+    /// 原始檔的存放根目錄（本地儲存實作）。相對路徑以應用程式根目錄為基準。
+    ///
+    /// ⚠ 這是 SeaweedFS 架設前的過渡方案。容器內的路徑不具持久性，
+    /// 要保留原始檔必須把此目錄掛成 volume。
+    /// </summary>
+    public string ObjectStorageRoot { get; set; } = "uploads";
+
+    /// <summary>
+    /// KV 預熱時每批送幾個片段。
+    ///
+    /// 預設與 RetrievalTopK 相同：批次大小決定 prompt 的總長度，
+    /// 而長度會影響引擎的分批行為。以相同長度預熱，命中狀況才與真實問答可比。
+    /// </summary>
+    public int WarmupBatchSize { get; set; } = 5;
+
     // ── C# 層的回答快取 ────────────────────────────────────────────
     //
     // ⚠ 預設關閉，而且量測 CacheBlend 效果時務必保持關閉。

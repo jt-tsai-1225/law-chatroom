@@ -25,7 +25,21 @@ builder.Services.AddScoped<IChatBotService, ChatBotService>();
 
 // Register RAG services
 builder.Services.AddScoped<IQdrantService, QdrantService>();
-builder.Services.AddScoped<IPDFParser, PDFParser>();
+
+// 法規解析。以子行程呼叫 tools/parse_pdf.py——那份 Python 實作是唯一
+// 經過實測的切分邏輯（327 片段、0 重複標籤），在 C# 重寫等於重新承擔
+// 一次靜默切壞的風險，見 LegalDocumentParser 的說明。
+builder.Services.AddScoped<ILegalDocumentParser, LegalDocumentParser>();
+
+// 原始檔儲存。SeaweedFS 尚未架設，先以本機磁碟實作頂著；
+// 屆時只需替換這一行的實作，上傳流程本身不動。
+builder.Services.AddSingleton<IObjectStorage, LocalObjectStorage>();
+
+// 匯入流程。JobStore 必須是 Singleton：上傳端點立刻回應，
+// 實際工作在背景跑，進度要跨請求查得到。
+builder.Services.AddSingleton<IIngestionJobStore, IngestionJobStore>();
+builder.Services.AddScoped<IIngestionService, IngestionService>();
+builder.Services.AddScoped<IKvWarmupService, KvWarmupService>();
 builder.Services.AddHttpClient("Embedding", client =>
 {
     client.Timeout = TimeSpan.FromSeconds(30);

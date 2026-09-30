@@ -17,4 +17,13 @@
     <Folder Include="uploads\" />
   </ItemGroup>
 
+  <ItemGroup>
+    <!--
+      法規解析腳本，必須隨發佈輸出一起帶走，否則容器內找不到它。
+      後端以子行程呼叫（見 Services/LegalDocumentParser.cs），
+      路徑由 RAGSettings.ParserScriptPath 指定，預設 tools/parse_pdf.py。
+    -->
+    <Content Include="tools/**" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
 </Project>

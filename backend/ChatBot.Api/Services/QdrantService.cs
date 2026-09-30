@@ -19,6 +19,16 @@ public interface IQdrantService
     Task DeleteDocumentAsync(string collectionName, string documentId);
 
     /// <summary>
+    /// 刪除某一部法典的全部片段，回傳刪除的數量。
+    ///
+    /// 重新上傳同名法典時用它做「取代」：切分規則一改，若不先清掉舊片段，
+    /// 兩種顆粒度的內容會並存於同一個集合、檢索同時撈到兩種——
+    /// 那是最難察覺的一種髒資料。
+    /// </summary>
+    Task<int> DeleteByTitleAsync(
+        string collectionName, string title, CancellationToken cancellationToken = default);
+
+    /// <summary>
     /// 取回集合中的所有片段（不做向量搜尋）。供診斷端點指定片段與順序使用。
     /// 目前語料僅 327 筆，全部載入的成本可忽略，因此不做分頁與過濾。
     /// </summary>
@@ -62,15 +72,16 @@ public class QdrantService : IQdrantService
                 Distance = Distance.Cosine
             });
 
-        // 建立權重索引
-        await _client.CreatePayloadIndexAsync(
-        collectionName,
-        "ArticleNumber",
-        schemaType: PayloadSchemaType.Keyword);
-        await _client.CreatePayloadIndexAsync(
-        collectionName,
-        "Chapter",
-        schemaType: PayloadSchemaType.Keyword);
+        // 建立 payload 索引。
+        // ⚠ 欄位名稱必須與寫入時的 payload 鍵**逐字相同**（大小寫有別）。
+        // 先前這裡寫的是 "ArticleNumber" 與 "Chapter"，而實際寫入的鍵是
+        // "articleNumber" 與 "chapter"——索引因此建在不存在的欄位上，
+        // 不會報錯，只是完全沒有作用。
+        foreach (var field in new[] { "title", "articleNumber", "chapter", "sourceFile" })
+        {
+            await _client.CreatePayloadIndexAsync(
+                collectionName, field, schemaType: PayloadSchemaType.Keyword);
+        }
     }
 
     public async Task<bool> CollectionExistsAsync(string collectionName)
@@ -123,7 +134,7 @@ public class QdrantService : IQdrantService
         return resultList.Select(r => (
             Result: new KnowledgeSearchResult
             {
-                Id = r.Id.ToString(),
+                Id = ExtractPointId(r.Id),
                 // 從 Qdrant payload 中提取實際值（處理 JSON 格式）
                 Content = ExtractPayloadValue(r.Payload, "content"),
                 Title = ExtractPayloadValue(r.Payload, "title"),
@@ -134,6 +145,18 @@ public class QdrantService : IQdrantService
             Score: (double)r.Score
         )).ToList();
     }
+
+    /// <summary>
+    /// 取出乾淨的 point id 字串。
+    ///
+    /// 不能用 PointId.ToString()：那是 protobuf 產生的方法，回傳的是
+    /// JSON 表示（例如 {"uuid":"…"}），不是 id 本身。拿它去比對或刪除都會失敗。
+    ///
+    /// PointId 是 oneof，未設定的那一邊會回傳型別預設值，
+    /// 因此以「Uuid 是否為空」判斷即可，不需要依賴產生的列舉名稱。
+    /// </summary>
+    private static string ExtractPointId(Qdrant.Client.Grpc.PointId id)
+        => !string.IsNullOrEmpty(id.Uuid) ? id.Uuid : id.Num.ToString();
 
     private string ExtractPayloadValue(IDictionary<string, Qdrant.Client.Grpc.Value> payload, string key)
     {
@@ -153,7 +176,7 @@ public class QdrantService : IQdrantService
         var list = response.Result
             .Select(p => new KnowledgeSearchResult
             {
-                Id = p.Id.ToString(),
+                Id = ExtractPointId(p.Id),
                 Content = ExtractPayloadValue(p.Payload, "content"),
                 Title = ExtractPayloadValue(p.Payload, "title"),
                 Chapter = ExtractPayloadValue(p.Payload, "chapter"),
@@ -169,6 +192,44 @@ public class QdrantService : IQdrantService
     public async Task DeleteDocumentAsync(string collectionName, string documentId)
     {
         await _client.DeleteAsync(collectionName, new Guid(documentId));
+    }
+
+    public async Task<int> DeleteByTitleAsync(
+        string collectionName, string title, CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(title)) return 0;
+
+        if (!await CollectionExistsAsync(collectionName)) return 0;
+
+        var all = await ScrollAllAsync(collectionName);
+        var victims = all
+            .Where(c => string.Equals(c.Title, title, StringComparison.Ordinal))
+            .ToList();
+
+        if (victims.Count == 0) return 0;
+
+        // 這個集合同時存在兩種 id 型別：早期以腳本匯入的片段用整數 id，
+        // 經由本服務寫入的用 UUID。客戶端的刪除方法依型別分開，
+        // 因此先分組再各自刪除。
+        var guids = new List<Guid>();
+        var nums = new List<ulong>();
+
+        foreach (var v in victims)
+        {
+            if (Guid.TryParse(v.Id, out var g)) guids.Add(g);
+            else if (ulong.TryParse(v.Id, out var n)) nums.Add(n);
+            else _logger.LogWarning("無法辨識的 point id，略過刪除：{Id}", v.Id);
+        }
+
+        if (guids.Count > 0) await _client.DeleteAsync(collectionName, guids);
+        if (nums.Count > 0) await _client.DeleteAsync(collectionName, nums);
+
+        var deleted = guids.Count + nums.Count;
+        _logger.LogInformation(
+            "[QdrantService] 已刪除「{Title}」的 {Count} 個片段（UUID {G}、整數 {N}）",
+            title, deleted, guids.Count, nums.Count);
+
+        return deleted;
     }
 
     /// <summary>

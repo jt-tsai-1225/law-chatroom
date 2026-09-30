@@ -39,9 +39,15 @@ public interface ILLMService
     /// 若送字串由伺服端 tokenize，分隔符會與相鄰文字合併成不同的 token，
     /// 片段邊界就對不上、快取永遠不命中。組裝的工作在 PromptBuilder。
     /// </summary>
+    /// <param name="maxTokens">
+    /// 覆寫這一次的生成長度上限；省略時使用 RAGSettings.LlmMaxTokens。
+    /// KV 預熱會傳 1——預熱只需要引擎把 prompt 算過一遍好把 KV 寫進快取，
+    /// 生成出來的字會被丟棄，讓它產生完整答案是純粹的浪費。
+    /// </param>
     Task<LLMCompletionResult> GenerateFromTokensAsync(
         IReadOnlyList<int> promptTokens,
-        CancellationToken cancellationToken = default);
+        CancellationToken cancellationToken = default,
+        int? maxTokens = null);
 }
 
 public class LLMService : ILLMService
@@ -81,7 +87,8 @@ public class LLMService : ILLMService
 
     public async Task<LLMCompletionResult> GenerateFromTokensAsync(
         IReadOnlyList<int> promptTokens,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        int? maxTokens = null)
     {
         var totalStopwatch = System.Diagnostics.Stopwatch.StartNew();
         var result = new LLMCompletionResult();
@@ -114,7 +121,7 @@ public class LLMService : ILLMService
         {
             Model = _settings.LlmModel,
             Prompt = promptTokens.ToArray(),
-            MaxTokens = _settings.LlmMaxTokens,
+            MaxTokens = maxTokens ?? _settings.LlmMaxTokens,
             Temperature = _settings.LlmTemperature
         };
 
