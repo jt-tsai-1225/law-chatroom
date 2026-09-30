@@ -31,9 +31,22 @@ builder.Services.AddScoped<IQdrantService, QdrantService>();
 // 一次靜默切壞的風險，見 LegalDocumentParser 的說明。
 builder.Services.AddScoped<ILegalDocumentParser, LegalDocumentParser>();
 
-// 原始檔儲存。SeaweedFS 尚未架設，先以本機磁碟實作頂著；
-// 屆時只需替換這一行的實作，上傳流程本身不動。
-builder.Services.AddSingleton<IObjectStorage, LocalObjectStorage>();
+// 原始檔儲存。由設定決定走本機磁碟或 SeaweedFS 的 S3 閘道——
+// 上傳流程只認 IObjectStorage，換後端不影響解析、向量化與預熱。
+// 直接讀設定值而非用已繫結的物件：RAGSettings 的繫結在本檔案下方才發生，
+// 而這裡要在註冊服務時就決定用哪一個實作。
+// 環境變數 RAGSettings__ObjectStorageBackend 會對應到這個鍵。
+var storageBackend =
+    (builder.Configuration["RAGSettings:ObjectStorageBackend"] ?? "local").ToLowerInvariant();
+
+if (storageBackend is "seaweedfs" or "s3")
+{
+    builder.Services.AddSingleton<IObjectStorage, SeaweedObjectStorage>();
+}
+else
+{
+    builder.Services.AddSingleton<IObjectStorage, LocalObjectStorage>();
+}
 
 // 匯入流程。JobStore 必須是 Singleton：上傳端點立刻回應，
 // 實際工作在背景跑，進度要跨請求查得到。

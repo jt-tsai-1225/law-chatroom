@@ -9,6 +9,16 @@
 
   <ItemGroup>
     <PackageReference Include="Microsoft.AspNetCore.Mvc.Abstractions" Version="2.2.0" />
+    <!--
+      SeaweedFS 的 S3 相容閘道用它存取。走 S3 API 而非 SeaweedFS 原生 API，
+      是為了不必自己處理 fid 的配發與保存（見 Services/SeaweedObjectStorage.cs）。
+
+      版本用浮動的 3.7.*：3.7 是長期穩定線，本專案只用到 PutObject／GetObject／
+      DeleteObject 這些十年沒變過的 API。
+      ⚠ 浮動版本代表每次還原可能拿到不同的建置，要可重現的建置請改成
+      首次還原實際取得的版本號（obj/project.assets.json 查得到）。
+    -->
+    <PackageReference Include="AWSSDK.S3" Version="3.7.*" />
     <PackageReference Include="Qdrant.Client" Version="1.9.0" />
     <PackageReference Include="Swashbuckle.AspNetCore" Version="6.5.0" />
   </ItemGroup>

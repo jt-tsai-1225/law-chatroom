@@ -124,12 +124,34 @@ public class RAGSettings
     public string PythonExecutable { get; set; } = "python3";
 
     /// <summary>
-    /// 原始檔的存放根目錄（本地儲存實作）。相對路徑以應用程式根目錄為基準。
+    /// 原始檔要存到哪裡："local"（本機磁碟）或 "seaweedfs"（S3 相容閘道）。
     ///
-    /// ⚠ 這是 SeaweedFS 架設前的過渡方案。容器內的路徑不具持久性，
-    /// 要保留原始檔必須把此目錄掛成 volume。
+    /// 保留 local 選項不是為了向後相容，而是因為物件儲存故障時
+    /// 問答與檢索本身並不依賴它——切回 local 仍能繼續上傳，
+    /// 不必為了存檔問題停掉整個服務。
+    /// </summary>
+    public string ObjectStorageBackend { get; set; } = "local";
+
+    /// <summary>
+    /// 原始檔的存放根目錄（local 實作）。相對路徑以應用程式根目錄為基準。
+    ///
+    /// ⚠ 容器內的路徑不具持久性，使用 local 時必須把此目錄掛成 volume。
     /// </summary>
     public string ObjectStorageRoot { get; set; } = "uploads";
+
+    // ── SeaweedFS（S3 相容閘道）────────────────────────────────────
+
+    /// <summary>S3 閘道位址，例如 http://seaweedfs:8333。</summary>
+    public string S3ServiceUrl { get; set; } = "http://seaweedfs:8333";
+
+    public string S3Bucket { get; set; } = "law-documents";
+
+    /// <summary>SeaweedFS 不分區域，但 AWS SDK 需要有值才簽得出簽章。</summary>
+    public string S3Region { get; set; } = "us-east-1";
+
+    /// <summary>憑證。請以環境變數帶入，不要寫進 appsettings.json。</summary>
+    public string S3AccessKey { get; set; } = "";
+    public string S3SecretKey { get; set; } = "";
 
     /// <summary>
     /// KV 預熱時每批送幾個片段。
