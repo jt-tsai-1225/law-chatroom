@@ -1,0 +1,8 @@
+# Dockerfile 先 COPY package*.json 再 npm install，最後才 COPY . .
+# 若把宿主機的 node_modules 一併複製進去，會覆蓋掉映像裡剛裝好的相依，
+# 而且宿主機裝的原生模組未必能在 alpine 上執行。
+node_modules/
+dist/
+
+.vscode/
+*.log
