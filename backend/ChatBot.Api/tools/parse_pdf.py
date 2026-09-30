@@ -81,10 +81,15 @@ class PDFParser:
     # ------------------------------------------------------------------
 
     def parse_pdf(self, pdf_path: str) -> dict:
+        # 套件的模組名是 pymupdf；舊名 fitz 仍可匯入，但會**往 stdout 印一行
+        # 棄用警告**，那會混進本腳本的 JSON 輸出裡。優先用新名，舊環境才退回。
         try:
-            import fitz
+            import pymupdf as fitz
         except ImportError:
-            raise SystemExit("缺少 pymupdf，請在容器內安裝：pip install pymupdf")
+            try:
+                import fitz
+            except ImportError:
+                raise SystemExit("缺少 pymupdf，請在容器內安裝：pip install pymupdf")
 
         doc = fitz.open(pdf_path)
         try:
@@ -311,20 +316,31 @@ def main() -> None:
 
     parser = PDFParser(chunk_size=args.chunk_size)
 
-    if args.text:
-        if not args.title:
-            raise SystemExit("--text 模式必須提供 --title")
-        result = parser.parse_text(sys.stdin.read(), args.title, args.source)
-    elif args.file:
-        if not os.path.exists(args.file):
-            raise SystemExit(f"找不到檔案：{args.file}")
-        result = parser.parse_pdf(args.file)
-        if args.title:
-            result["title"] = args.title
-            for c in result["chunks"]:
-                c["title"] = args.title
-    else:
-        raise SystemExit("請指定 --file 或 --text")
+    # stdout 必須只有 JSON——呼叫端直接剖析它。
+    #
+    # 但第三方套件不見得守這個規矩：pymupdf 以舊名 fitz 匯入時會往 stdout
+    # 印一行棄用警告，混進輸出就讓整份 JSON 失效（2026/09/30 實際踩到）。
+    # 改用新名可以解掉那一個，但不能保證沒有下一個，所以乾脆把整段工作期間
+    # 的 stdout 導向 stderr，最後才把 JSON 寫回真正的 stdout。
+    real_stdout = sys.stdout
+    sys.stdout = sys.stderr
+    try:
+        if args.text:
+            if not args.title:
+                raise SystemExit("--text 模式必須提供 --title")
+            result = parser.parse_text(sys.stdin.read(), args.title, args.source)
+        elif args.file:
+            if not os.path.exists(args.file):
+                raise SystemExit(f"找不到檔案：{args.file}")
+            result = parser.parse_pdf(args.file)
+            if args.title:
+                result["title"] = args.title
+                for c in result["chunks"]:
+                    c["title"] = args.title
+        else:
+            raise SystemExit("請指定 --file 或 --text")
+    finally:
+        sys.stdout = real_stdout
 
     json.dump(result, sys.stdout, ensure_ascii=False)
     sys.stdout.write("\n")

@@ -169,16 +169,7 @@ public class LegalDocumentParser : ILegalDocumentParser
                 $"解析腳本以代碼 {process.ExitCode} 結束：{stderr.Trim()}");
         }
 
-        ParseResult? result;
-        try
-        {
-            result = JsonSerializer.Deserialize<ParseResult>(stdout);
-        }
-        catch (JsonException ex)
-        {
-            throw new InvalidOperationException(
-                $"解析腳本的輸出不是有效的 JSON：{Truncate(stdout, 500)}", ex);
-        }
+        var result = Deserialize(stdout);
 
         if (result is null)
         {
@@ -190,6 +181,57 @@ public class LegalDocumentParser : ILegalDocumentParser
             result.Title, result.ArticleCount, result.Chunks.Count, sw.ElapsedMilliseconds);
 
         return result;
+    }
+
+    /// <summary>
+    /// 把腳本的 stdout 轉成結果。
+    ///
+    /// 腳本保證 stdout 只有 JSON，但那個保證依賴第三方套件守規矩，而它們不一定守：
+    /// pymupdf 以舊名匯入時會往 stdout 印一行棄用警告，整份 JSON 就此失效。
+    /// 腳本端已經把工作期間的 stdout 導開，這裡再補一層——
+    /// 解析明明成功了（五百多條條文都在），只因為前面多一行字就整批丟掉，
+    /// 代價與風險完全不成比例。
+    ///
+    /// 退而求其次時會記一筆警告，不讓它靜悄悄地被容忍掉。
+    /// </summary>
+    private ParseResult Deserialize(string stdout)
+    {
+        try
+        {
+            var direct = JsonSerializer.Deserialize<ParseResult>(stdout);
+            if (direct is not null) return direct;
+        }
+        catch (JsonException)
+        {
+            // 落到下面的容錯路徑
+        }
+
+        var start = stdout.IndexOf('{');
+        var end = stdout.LastIndexOf('}');
+
+        if (start >= 0 && end > start)
+        {
+            var slice = stdout[start..(end + 1)];
+            try
+            {
+                var salvaged = JsonSerializer.Deserialize<ParseResult>(slice);
+                if (salvaged is not null)
+                {
+                    _logger.LogWarning(
+                        "解析腳本的 stdout 混入了非 JSON 內容，已略過前後雜訊後取用。" +
+                        "前綴內容：{Prefix}", Truncate(stdout[..start], 200));
+                    return salvaged;
+                }
+            }
+            catch (JsonException ex)
+            {
+                throw new InvalidOperationException(
+                    $"解析腳本的輸出不是有效的 JSON：{Truncate(stdout, 500)}", ex);
+            }
+        }
+
+        throw new InvalidOperationException(
+            $"解析腳本的輸出不是有效的 JSON：{Truncate(stdout, 500)}");
     }
 
     private static string Truncate(string s, int max)
