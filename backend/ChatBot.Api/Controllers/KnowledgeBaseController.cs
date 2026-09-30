@@ -41,6 +41,7 @@ public class KnowledgeBaseController : ControllerBase
     private readonly ILegalDocumentParser _parser;
     private readonly IKvWarmupService _warmup;
     private readonly IIngestionJobStore _jobs;
+    private readonly IChunkCacheTracker _tracker;
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly ILogger<KnowledgeBaseController> _logger;
 
@@ -55,6 +56,7 @@ public class KnowledgeBaseController : ControllerBase
         ILegalDocumentParser parser,
         IKvWarmupService warmup,
         IIngestionJobStore jobs,
+        IChunkCacheTracker tracker,
         IServiceScopeFactory scopeFactory,
         ILogger<KnowledgeBaseController> logger)
     {
@@ -63,6 +65,7 @@ public class KnowledgeBaseController : ControllerBase
         _parser = parser;
         _warmup = warmup;
         _jobs = jobs;
+        _tracker = tracker;
         _scopeFactory = scopeFactory;
         _logger = logger;
     }
@@ -297,10 +300,16 @@ public class KnowledgeBaseController : ControllerBase
     // ══════════════════════════════════════════════════════════════
 
     /// <summary>
-    /// 列出知識庫現況：每部法典的片段數與字數分佈。
+    /// 列出知識庫現況：每部法典的片段數、字數分佈，以及 KV 預熱狀態。
     ///
     /// 先前這個端點回傳的是寫死的示範資料，看起來正常卻與實際內容無關。
     /// 現在直接從 Qdrant 統計。
+    ///
+    /// ⚠ 預熱狀態是**樂觀估計**，不是向引擎查詢的結果。
+    /// 它來自後端自己的送出紀錄（ChunkCacheTracker），因此在兩種情況下會失準：
+    ///   vLLM 重啟而後端沒重啟 → 這裡說已暖，實際上引擎已清空
+    ///   後端重啟而 vLLM 沒重啟 → 這裡說未暖，實際上引擎還留著
+    /// 兩者都只影響顯示與排序決策，不會產生錯誤答案。
     /// </summary>
     [HttpGet("documents")]
     public async Task<IActionResult> GetDocuments([FromQuery] string? law = null)
@@ -309,13 +318,22 @@ public class KnowledgeBaseController : ControllerBase
 
         var laws = all
             .GroupBy(c => c.Title ?? "")
-            .Select(g => new
+            .Select(g =>
             {
-                law = g.Key,
-                chunks = g.Count(),
-                totalChars = g.Sum(c => c.Content.Length),
-                medianChars = Median(g.Select(c => c.Content.Length).ToList()),
-                chapters = g.Select(c => c.Chapter).Distinct().Count()
+                var warmed = g.Count(c => _tracker.IsLikelyCached(c.Content));
+
+                return new
+                {
+                    law = g.Key,
+                    chunks = g.Count(),
+                    totalChars = g.Sum(c => c.Content.Length),
+                    medianChars = Median(g.Select(c => c.Content.Length).ToList()),
+                    chapters = g.Select(c => c.Chapter).Distinct().Count(),
+
+                    // KV 預熱狀態
+                    warmedChunks = warmed,
+                    warmed = warmed == g.Count() && warmed > 0
+                };
             })
             .OrderBy(x => x.law)
             .ToList();
@@ -333,7 +351,15 @@ public class KnowledgeBaseController : ControllerBase
             })
             .ToList();
 
-        return Ok(new { totalChunks = all.Count, laws, chunks });
+        return Ok(new
+        {
+            totalChunks = all.Count,
+            warmedChunks = laws.Sum(l => l.warmedChunks),
+            warmupNote = "預熱狀態為後端的送出紀錄推估，非向引擎查詢；" +
+                         "任一方重啟後會失準，重新預熱即可對齊",
+            laws,
+            chunks
+        });
     }
 
     private static int Median(List<int> values)

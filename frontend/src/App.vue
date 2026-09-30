@@ -101,6 +101,7 @@ async function scrollDown() {
 
 const laws = ref([])
 const totalChunks = ref(0)
+const warmedChunks = ref(0)
 const kbLoading = ref(false)
 const kbError = ref('')
 
@@ -123,11 +124,22 @@ const STAGE_TEXT = {
   failed: '失敗'
 }
 
-const STAGE_ORDER = ['storing', 'parsing', 'embedding', 'warmup', 'done']
+const ALL_STAGES = ['storing', 'parsing', 'embedding', 'warmup', 'done']
+
+/**
+ * 這次實際會經過的階段。
+ *
+ * 沒有勾選預熱時必須把 warmup 這一格拿掉——先前是固定畫出五格，
+ * 而工作完成後所有排在 done 之前的格子都被標成「完成」，
+ * 於是即使預熱從未執行，畫面上也顯示它做完了。那是在騙人。
+ */
+const stages = computed(() =>
+  ALL_STAGES.filter(s => s !== 'warmup' || job.value?.warmupRequested)
+)
 
 const stageIndex = computed(() => {
   if (!job.value) return -1
-  return STAGE_ORDER.indexOf(job.value.stage)
+  return stages.value.indexOf(job.value.stage)
 })
 
 async function loadKnowledgeBase() {
@@ -137,6 +149,7 @@ async function loadKnowledgeBase() {
     const { data } = await axios.get(`${API}/knowledgebase/documents`)
     laws.value = data.laws || []
     totalChunks.value = data.totalChunks || 0
+    warmedChunks.value = data.warmedChunks || 0
   } catch (err) {
     kbError.value = describeError(err)
   } finally {
@@ -207,6 +220,8 @@ async function runWarmup(law) {
     warmupResult.value = { error: describeError(err) }
   } finally {
     warming.value = false
+    // 預熱改變了狀態欄該顯示的內容，重新取一次
+    await loadKnowledgeBase()
   }
 }
 
@@ -342,7 +357,7 @@ onUnmounted(stopPolling)
         <div v-if="job" class="job">
           <div class="steps">
             <span
-              v-for="(s, i) in STAGE_ORDER"
+              v-for="(s, i) in stages"
               :key="s"
               :class="['step', {
                 done: stageIndex > i,
@@ -350,6 +365,10 @@ onUnmounted(stopPolling)
                 failed: job.stage === 'failed'
               }]"
             >{{ STAGE_TEXT[s] }}</span>
+
+            <span v-if="!job.warmupRequested" class="step skipped">
+              預算 KV（未勾選，略過）
+            </span>
           </div>
 
           <p v-if="job.stage === 'failed'" class="err">匯入失敗：{{ job.error }}</p>
@@ -397,7 +416,10 @@ onUnmounted(stopPolling)
 
         <table v-else class="table">
           <thead>
-            <tr><th>法典</th><th>片段數</th><th>總字數</th><th>字數中位數</th><th>章節數</th><th></th></tr>
+            <tr>
+              <th>法典</th><th>片段數</th><th>總字數</th><th>字數中位數</th>
+              <th>章節數</th><th>KV 預熱</th><th></th>
+            </tr>
           </thead>
           <tbody>
             <tr v-for="l in laws" :key="l.law">
@@ -406,6 +428,13 @@ onUnmounted(stopPolling)
               <td>{{ fmtNum(l.totalChars) }}</td>
               <td>{{ fmtNum(l.medianChars) }}</td>
               <td>{{ fmtNum(l.chapters) }}</td>
+              <td>
+                <span v-if="l.warmed" class="badge good">已預熱</span>
+                <span v-else-if="l.warmedChunks > 0" class="badge partial">
+                  部分 {{ l.warmedChunks }}/{{ l.chunks }}
+                </span>
+                <span v-else class="badge plain">未預熱</span>
+              </td>
               <td><button @click="runWarmup(l.law)" :disabled="warming">預熱</button></td>
             </tr>
           </tbody>
@@ -414,10 +443,20 @@ onUnmounted(stopPolling)
               <td>合計</td>
               <td>{{ fmtNum(totalChunks) }}</td>
               <td colspan="3"></td>
+              <td>{{ fmtNum(warmedChunks) }} / {{ fmtNum(totalChunks) }}</td>
               <td><button @click="runWarmup(null)" :disabled="warming">全部預熱</button></td>
             </tr>
           </tfoot>
         </table>
+
+        <!--
+          必須講明這是推估而非事實，否則「已預熱」這三個字會被當成保證。
+          後端記的是自己送過什麼，引擎那邊被清空時它不會知道。
+        -->
+        <p class="hint">
+          預熱狀態由後端的送出紀錄推估，並非向引擎查詢。
+          vLLM 或後端任一方重啟後會失準，重新預熱即可對齊。
+        </p>
 
         <!--
           這段說明必須留著。L2 的索引存在記憶體，服務重啟後磁碟上的 KV
@@ -526,6 +565,8 @@ body {
 .badge { padding: 1px 7px; border-radius: 10px; font-weight: 600; }
 .badge.good { background: rgba(63, 191, 127, 0.18); color: var(--good); }
 .badge.plain { background: var(--line); color: var(--dim); }
+.badge.partial { background: rgba(224, 168, 60, 0.18); color: var(--warn); }
+.step.skipped { background: transparent; border: 1px dashed var(--line); color: var(--dim); }
 .note { color: var(--good); font-size: 0.76rem; margin: 2px 0 6px; }
 .articles code {
   background: var(--line); padding: 1px 6px; border-radius: 4px;
