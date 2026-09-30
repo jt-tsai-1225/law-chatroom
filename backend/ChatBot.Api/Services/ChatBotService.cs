@@ -94,35 +94,51 @@ public class ChatBotService : IChatBotService
         chunks = Deduplicate(chunks);
 
         // 第 ③ 步：決定片段順序。
-        // 正常情況走 ReorderCachedFirst；"asis" 與 "reverse" 是驗證用的覆寫，
-        // 只影響順序，不影響片段組合，因此可以乾淨地隔離「順序」這個變因。
-        var mode = (request.ChunkOrder ?? "default").Trim().ToLowerInvariant();
+        // 正常情況走 ReorderCachedFirst；其餘模式是驗證用的明確排列，
+        // 只影響順序、不影響片段組合，因此可以乾淨地隔離「順序」這個變因。
+        var mode = ChunkOrderStrategy.Normalize(request.ChunkOrder);
+        var seed = request.ChunkOrderSeed ?? ChunkOrderStrategy.DefaultSeed;
+
         List<RetrievedChunk> ordered;
         bool reordered;
+        List<int> permutation;
+        int? seedUsed = null;
 
-        switch (mode)
+        if (ChunkOrderStrategy.IsExplicit(mode))
         {
-            case "asis":
-                ordered = chunks;
-                reordered = false;
-                break;
+            permutation = ChunkOrderStrategy.BuildPermutation(mode, chunks.Count, seed);
+            ordered = permutation.Select(i => chunks[i]).ToList();
+            reordered = false;
 
-            case "reverse":
-                ordered = Enumerable.Reverse(chunks).ToList();
-                reordered = false;
-                _logger.LogInformation(
-                    "片段順序已倒轉（chunkOrder=reverse）→ {Order}",
-                    string.Join("、", ordered.Select(c => c.Label)));
-                break;
+            if (mode == ChunkOrderStrategy.Shuffle)
+            {
+                seedUsed = seed;
+            }
 
-            default:
-                mode = "default";
-                (ordered, reordered) = ReorderCachedFirst(chunks);
-                break;
+            _logger.LogInformation(
+                "片段排列 {Mode}{Seed}：[{Perm}] → {Order}",
+                mode,
+                seedUsed is null ? "" : $"（seed={seedUsed}）",
+                string.Join(",", permutation),
+                string.Join("、", ordered.Select(c => c.Label)));
+        }
+        else
+        {
+            (ordered, reordered) = ReorderCachedFirst(chunks);
+
+            // 依快取狀態重排是比對內容決定的，排列表只能從結果反推
+            permutation = ordered
+                .Select(c => chunks.FindIndex(x => ReferenceEquals(x, c)))
+                .ToList();
         }
 
         var prompt = await _promptBuilder.BuildAsync(ordered, request.Message, cancellationToken);
         var llmResult = await _llmService.GenerateFromTokensAsync(prompt.Tokens, cancellationToken);
+
+        // 純前綴快取在本次請求能命中的上限。缺少這個對照，
+        // 「命中率 99.98%」無法區分究竟是 blend 生效還是單純的前綴複用。
+        var prefixCeiling = ChunkOrderStrategy.PrefixOnlyCeiling(
+            permutation, prompt.ChunkOffsets, prompt.Tokens.Length);
 
         // 成功送出之後才記錄，避免把失敗的請求也當成已快取
         _cacheTracker.MarkSent(ordered.Select(c => c.ComposeSegmentText()));
@@ -147,7 +163,13 @@ public class ChatBotService : IChatBotService
             CacheHitRate = llmResult.CacheHitRate,
             RetrievedArticles = ordered.Select(c => c.Label).ToList(),
             ReorderedForCache = reordered,
-            ChunkOrderApplied = mode
+            ChunkOrderApplied = mode,
+            ChunkPermutation = permutation,
+            ChunkOrderSeedUsed = seedUsed,
+            PrefixOnlyCeilingTokens = prefixCeiling,
+            CachedOverPrefixCeiling = prefixCeiling > 0
+                ? Math.Round((double)llmResult.CachedTokens / prefixCeiling, 2)
+                : 0
         };
     }
 
