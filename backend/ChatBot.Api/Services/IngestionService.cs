@@ -242,11 +242,58 @@ public class IngestionService : IIngestionService
             job.Error = ex.Message;
             job.FinishedAt = DateTime.UtcNow;
             _logger.LogError(ex, "匯入失敗：{File}", job.FileName);
+
+            await CleanUpOrphanAsync(job);
         }
         finally
         {
             // 暫存檔已經複製進物件儲存，這裡的副本沒有保留價值
             TryDelete(pdfPath);
+        }
+    }
+
+    /// <summary>
+    /// 匯入失敗時清掉已保存但無人引用的原始檔。
+    ///
+    /// 為什麼會有孤兒：流程是「先保存原始檔、再解析」，因此解析失敗時
+    /// 檔案已經寫進去了。2026/09/30 一次解析錯誤就留下兩份無用的公司法 PDF，
+    /// 而且從外觀看不出哪一份是有效的——在共用機器上這種累積比遺失更麻煩。
+    ///
+    /// ⚠ 只在**完全沒有任何片段寫進 Qdrant** 時才刪。
+    /// 一旦有片段寫入，它們的 payload 就記著這個 storageKey，刪掉檔案會讓
+    /// 那些片段指向不存在的來源——那比留一份孤兒檔案糟得多。
+    /// 因此預熱階段失敗（此時片段早已寫入）不會觸發清理。
+    ///
+    /// 清理本身失敗不會覆蓋原本的錯誤：使用者要知道的是匯入為什麼失敗，
+    /// 而不是善後動作的細節。
+    /// </summary>
+    private async Task CleanUpOrphanAsync(IngestionJob job)
+    {
+        if (string.IsNullOrEmpty(job.StorageKey)) return;
+
+        if (job.EmbeddedCount > 0)
+        {
+            job.Warnings.Add(
+                $"已有 {job.EmbeddedCount} 個片段寫入知識庫，原始檔保留（{job.StorageKey}）");
+            return;
+        }
+
+        try
+        {
+            var removed = await _storage.DeleteAsync(job.StorageKey, CancellationToken.None);
+
+            if (removed)
+            {
+                _logger.LogInformation(
+                    "匯入失敗，已清除無人引用的原始檔 {Key}", job.StorageKey);
+                job.Warnings.Add("匯入失敗，已自動清除保存的原始檔");
+                job.StorageKey = null;
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "清除原始檔失敗，將留下孤兒檔案：{Key}", job.StorageKey);
+            job.Warnings.Add($"自動清除原始檔失敗，需手動處理：{job.StorageKey}");
         }
     }
 
