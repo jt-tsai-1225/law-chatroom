@@ -1,48 +1,234 @@
+# law-chatroom 全套服務
+#
+# 用法：
+#   cp .env.example .env          # 填好路徑
+#   docker network create lawnet  # 僅第一次
+#   docker compose up -d --build
+#
+# ── 為什麼服務名與 container_name 都要指定 ────────────────────────
+# compose 以**服務名**建立網路別名（backend、qdrant…），container_name
+# 又讓容器維持既有的名字（law-backend、law-qdrant…）。兩者在同一個網路上
+# 都解析得到，於是：
+#   * 現有的 nginx.conf 與環境變數（指向 law-backend、law-qdrant）不必改
+#   * 服務名與日後 Helm chart 的 k8s Service 名稱一致，搬過去不必重新命名
+#
+# ── 啟動順序由 healthcheck 決定 ─────────────────────────────────
+# 取代了原本手動的
+#   until curl -sf http://localhost:8000/v1/models; do sleep 3; done
+# vLLM 載入模型要一兩分鐘，後端太早起來會在第一個請求就失敗。
+
+name: law-chatroom
+
+networks:
+  lawnet:
+    # 既有網路，以 `docker network create lawnet` 建立。
+    # 宣告為 external 是為了讓遷移期間仍在 compose 之外啟動的容器也能互通。
+    external: true
+    name: lawnet
+
 services:
-  backend:
-    build:
-      context: ./backend/ChatBot.Api
-      dockerfile: Dockerfile
-    image: chatbot-backend:latest
-    container_name: chatbot-backend
+
+  # ────────────────────────────────────────────────────────────
+  #  推論引擎：vLLM + LMCache（CacheBlend）
+  # ────────────────────────────────────────────────────────────
+  vllm:
+    container_name: blend-vllm-024
+    image: lmcache/vllm-openai:v0.5.1
+    restart: unless-stopped
+    networks: [lawnet]
     ports:
       - "8000:8000"
+    ipc: host
+
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ['0']
+              capabilities: [gpu]
+
+    volumes:
+      - ${MODEL_DIR:-/mnt/nvme0/mistral-model}:/root/.cache/huggingface
+      - ${L2_DIR:-/mnt/nvme0/mistral-fs}:${L2_DIR:-/mnt/nvme0/mistral-fs}
+      # ⚠ 補丁檔必須放在開機後仍存在的位置。
+      #   bind mount 來源不存在時 docker 會建一個**空目錄**蓋上去——
+      #   補丁不報錯，是靜默失效。搭配 restart: unless-stopped，
+      #   重開機就中招。放 /tmp 必然出事。
+      - ${PATCH_DIR:-/home/oem/blend-patches}/gpu_worker_v0240.py:/opt/venv/lib/python3.12/site-packages/vllm/v1/worker/gpu_worker.py:ro
+      - ${PATCH_DIR:-/home/oem/blend-patches}/lmc_models_utils_v0240.py:/opt/venv/lib/python3.12/site-packages/lmcache/v1/compute/models/utils.py:ro
+
     environment:
-      - ASPNETCORE_ENVIRONMENT=Development
-      - ASPNETCORE_URLS=http://+:8000
-      - QDRANT_HOST=qdrant
-      - QDRANT_PORT=6333
-      - QDRANT_GRPC_PORT=6334
-      - EMBEDDING_API_KEY=${EMBEDDING_API_KEY:-your-api-key-here}
-      - EMBEDDING_MODEL=text-embedding-ada-002
-    depends_on:
-      qdrant:
-        condition: service_started
+      # 啟用 blend：缺一則整個機制不會啟動
+      BLEND_REGISTER_PATCH: "1"
+      LMCACHE_ENABLE_BLENDING: "True"
+      LMCACHE_BLEND_SPECIAL_STR: "# #"
+      LMCACHE_USE_LAYERWISE: "True"
 
-  frontend:
-    build:
-      context: ./frontend
-      dockerfile: Dockerfile
-    image: chatbot-frontend:latest
-    container_name: chatbot-frontend
-    ports:
-      - "80:80"
-    depends_on:
-      - backend
+      # 正確性前提：LMCache 以 Python 內建 hash() 算指紋，未固定種子則指紋不穩
+      PYTHONHASHSEED: "0"
 
+      # 可調旋鈕
+      LMCACHE_BLEND_CHECK_LAYERS: "1"
+      LMCACHE_BLEND_RECOMPUTE_RATIOS: "0.15"
+
+      # ⚠ 容量是安全性參數，不只是效能參數。
+      #   L1 裝滿後開始淘汰，而淘汰路徑有缺陷（LMCache issue #4133），
+      #   結果是**整個引擎終止**，沒有優雅降級。
+      #   2026/09/30 實測：設 8 GB 時，預熱 327 個片段在第 120 段崩潰。
+      #
+      #   每 token 的 KV = 2 × 32 層 × 8 KV heads × 128 dim × 2 bytes = 128 KiB
+      #   2026/10/01 實測：334 段、相異 token 234,395 → 28.6 GiB，磁碟實佔 29G。
+      #   50 GB 可容納 409,600 tokens ≈ 584 段（每段平均 702 tokens）。
+      #   **新增法典前務必先算過並調大 L1_SIZE_GB，詳見 deploy/README.md。**
+      LMCACHE_LOCAL_CPU: "True"
+      LMCACHE_MAX_LOCAL_CPU_SIZE: "${L1_SIZE_GB:-50}"
+      LMCACHE_LOCAL_DISK: "file://${L2_DIR:-/mnt/nvme0/mistral-fs}/"
+      LMCACHE_MAX_LOCAL_DISK_SIZE: "${L2_SIZE_GB:-50}"
+
+      VLLM_SERVER_DEV_MODE: "1"
+
+      # 刻意不設 LMCACHE_CHUNK_SIZE：blend 模式下它不起作用
+      # （cache_engine.py:2083 依 enable_blending 分流到 SegmentTokenDatabase，
+      #  該類別完全不使用 chunk_size），留著只會讓人以為調它有效。
+
+    # ⚠ 必須用明確的陣列，不可寫成 `command: >` 的折疊字串。
+    #   compose 會把折疊字串按空白切成陣列，切的時候**單引號會被吃掉**，
+    #   --kv-transfer-config 的 JSON 就失去保護。更糟的是搭配
+    #   entrypoint: ["/bin/sh","-c"] 時，sh -c 只把第一個參數當成腳本、
+    #   其餘變成 $0 $1…，等於只執行了一個不帶參數的 `vllm`，服務直接起不來。
+    #
+    #   陣列形式完全不經過 shell，每個元素原樣成為一個 argv，JSON 得以保留。
+    entrypoint: ["vllm"]
+    command:
+      - serve
+      - ${LLM_MODEL:-mistralai/Mistral-7B-Instruct-v0.2}
+      - --kv-transfer-config
+      - '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_both"}'
+      - --tensor-parallel-size
+      - "1"
+      - --no-enable-prefix-caching          # 必須明確關閉；V1 引擎預設會解析為 True
+      - --enable-prompt-tokens-details      # 讓 usage.prompt_tokens_details.cached_tokens 有值
+      - --max-model-len
+      - "32648"
+      - --max-num-batched-tokens            # 必須大於最長 prompt，否則會被截斷
+      - "32768"
+      - --gpu-memory-utilization
+      - "0.7"
+      - --enforce-eager                     # CacheBlend 不支援 CUDA Graph（issue #2639）
+
+    healthcheck:
+      # 用 python 而非 curl：這個映像不保證有 curl，但一定有 python。
+      test: ["CMD", "python3", "-c",
+             "import urllib.request; urllib.request.urlopen('http://localhost:8000/v1/models')"]
+      interval: 15s
+      timeout: 5s
+      retries: 40        # 模型載入可能一兩分鐘，retries 要給夠
+      start_period: 60s
+
+  # ────────────────────────────────────────────────────────────
+  #  向量資料庫
+  # ────────────────────────────────────────────────────────────
   qdrant:
+    container_name: law-qdrant
     image: qdrant/qdrant:latest
-    container_name: chatbot-qdrant
+    restart: unless-stopped
+    networks: [lawnet]
     ports:
       - "6333:6333"
       - "6334:6334"
     volumes:
-      # 不可掛 ./qdrant_storage —— 那會把資料庫檔案寫進 git 儲存庫裡，
-      # 造成 git status 永遠是髒的，而且 git pull / checkout 會在資料庫
-      # 運行中改寫檔案導致損毀。改用 docker 管理的具名 volume。
-      # 要指定主機路徑時，設環境變數 QDRANT_STORAGE 並改成 bind mount。
-      - qdrant_data:/qdrant/storage
-    restart: unless-stopped
+      # ⚠ 必須是現有資料的實際位置。先前這裡掛的是 compose 具名 volume，
+      #   照那份啟動會得到一個**空的**資料庫——334 個片段不會出現，
+      #   而且看起來像是資料遺失而非掛錯路徑。
+      #
+      #   也不可改成 ./qdrant_storage：資料庫檔案落在 git 儲存庫內，
+      #   git checkout／clean 會在運行中改寫它（2026/09/24 的教訓）。
+      - ${QDRANT_DIR:-/home/oem/qdrant_storage}:/qdrant/storage
 
-volumes:
-  qdrant_data:
+  # ────────────────────────────────────────────────────────────
+  #  物件儲存（原始 PDF）
+  # ────────────────────────────────────────────────────────────
+  seaweedfs:
+    container_name: law-seaweedfs
+    image: chrislusf/seaweedfs:latest
+    restart: unless-stopped
+    networks: [lawnet]
+    ports:
+      # 主機埠刻意錯開：193 上另有同仁的一套 SeaweedFS（phison-network）。
+      # 這三個只供除錯，後端走網路內部的 8333。
+      - "9334:9333"
+      - "8889:8888"
+      - "8334:8333"
+    volumes:
+      - ${SEAWEED_DIR:-/home/oem/law-chatroom-data/seaweed}/data:/data
+      - ${SEAWEED_DIR:-/home/oem/law-chatroom-data/seaweed}/conf:/conf:ro
+    command: >
+      server -dir=/data
+        -master.volumeSizeLimitMB=1024
+        -filer
+        -s3 -s3.config=/conf/s3.json
+
+  # ────────────────────────────────────────────────────────────
+  #  後端 API
+  # ────────────────────────────────────────────────────────────
+  backend:
+    container_name: law-backend
+    build:
+      context: ./backend/ChatBot.Api
+    image: law-backend:latest
+    restart: unless-stopped
+    networks: [lawnet]
+    # 刻意不發佈主機埠：由 frontend 的 nginx 代理 /api 與 /docs，
+    # 而公司網路只放行 8080，多開也連不到。
+
+    env_file:
+      # 憑證放在 repo 之外。
+      # ⚠ env 檔不會去掉引號，= 前後也不能有空白——寫成 KEY="abc" 時
+      #   值會包含引號本身，S3 簽章就過不了（2026/09/30 踩過）。
+      - ${ENV_FILE:-/home/oem/.law-env}
+
+    environment:
+      ASPNETCORE_ENVIRONMENT: Development   # 顯示詳細錯誤，並啟用 Swagger (/docs)
+      RAGSettings__QdrantHost: law-qdrant
+      RAGSettings__LlmBaseUrl: "http://${HOST_IP:-10.102.197.193}:8000"
+      # 新版 AWS SDK 預設附加 CRC32 校驗和，部分 S3 相容實作會因此簽章失敗
+      AWS_REQUEST_CHECKSUM_CALCULATION: when_required
+
+    volumes:
+      # local 儲存後端的落地處。切到 seaweedfs 後不再寫入，
+      # 保留掛載是為了能隨時切回去（SeaweedFS 故障時的備援）。
+      - ${UPLOAD_DIR:-/home/oem/lawfiles}:/app/uploads
+
+    depends_on:
+      vllm:
+        condition: service_healthy
+      qdrant:
+        condition: service_started
+      seaweedfs:
+        condition: service_started
+
+    healthcheck:
+      # 這個端點只碰 Qdrant，不會送任何 prompt 給模型、不污染 KV 快取。
+      test: ["CMD", "python3", "-c",
+             "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/knowledgebase/documents')"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 20s
+
+  # ────────────────────────────────────────────────────────────
+  #  前端（nginx：靜態頁面 + /api 與 /docs 反向代理）
+  # ────────────────────────────────────────────────────────────
+  frontend:
+    container_name: law-frontend
+    build:
+      context: ./frontend
+    image: law-frontend:latest
+    restart: unless-stopped
+    networks: [lawnet]
+    ports:
+      - "${WEB_PORT:-8080}:80"
+    depends_on:
+      backend:
+        condition: service_healthy
