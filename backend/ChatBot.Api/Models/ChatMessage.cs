@@ -13,6 +13,27 @@ public class ChatRequest
     public List<ChatMessage>? ConversationHistory { get; set; }
 
     /// <summary>
+    /// 要把這則訊息記進哪個聊天室。省略時不保存，也不帶對話歷史——
+    /// 行為與加入聊天室功能之前完全相同，既有的量測腳本不受影響。
+    ///
+    /// 有值時：後端自資料庫取出最近幾則訊息當作上下文（見
+    /// RAGSettings.MaxHistoryMessages），並把本次問答寫回該聊天室。
+    /// </summary>
+    public Guid? ConversationId { get; set; }
+
+    /// <summary>
+    /// 要打哪一個推論端點：
+    ///   "cacheblend"（預設）  CacheBlend，非前綴 KV 複用
+    ///   "lmcache"             純 LMCache，一般區塊前綴快取
+    ///   "none"                不掛快取，每次完整重算
+    ///
+    /// 端點的對應見 RAGSettings.LlmEndpoints。指定的模式若沒有設定端點，
+    /// 或端點探測不到，請求會回 503 並說明——而不是靜默退回預設模式，
+    /// 那會讓使用者以為自己在比較兩種快取，實際上打的是同一個。
+    /// </summary>
+    public string? CacheMode { get; set; }
+
+    /// <summary>
     /// 這一次要如何排列檢索回來的條文片段。用於驗證 CacheBlend 的非前綴複用能力。
     ///
     ///   null / "default"  依快取狀態重排（正式行為，見 RAGSettings.ReorderByCacheStatus）
@@ -107,4 +128,24 @@ public class ChatResponse
 
     /// <summary>CachedTokens 與前綴上限的倍數。大於 1 表示超出前綴快取所能解釋的範圍。</summary>
     public double CachedOverPrefixCeiling { get; set; }
+
+    // ── 聊天室 ──────────────────────────────────────────────────────
+
+    /// <summary>本次記進哪個聊天室；請求未指定聊天室時為 null。</summary>
+    public Guid? ConversationId { get; set; }
+
+    /// <summary>
+    /// 本次問答是否成功寫入資料庫。
+    ///
+    /// false 代表答案是好的、只是沒存下來。之所以不把寫入失敗變成
+    /// HTTP 500，是因為使用者此刻已經拿到回答——讓次要功能的故障
+    /// 升級成主要功能的故障沒有道理。前端據此提示「未保存」即可。
+    /// </summary>
+    public bool Persisted { get; set; }
+
+    /// <summary>本次實際帶進 prompt 的歷史訊息則數。</summary>
+    public int HistoryMessagesUsed { get; set; }
+
+    /// <summary>本次實際使用的快取模式："cacheblend" / "lmcache" / "none"。</summary>
+    public string CacheMode { get; set; } = "cacheblend";
 }

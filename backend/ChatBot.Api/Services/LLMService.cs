@@ -44,10 +44,27 @@ public interface ILLMService
     /// KV 預熱會傳 1——預熱只需要引擎把 prompt 算過一遍好把 KV 寫進快取，
     /// 生成出來的字會被丟棄，讓它產生完整答案是純粹的浪費。
     /// </param>
+    /// <param name="cacheMode">
+    /// 要打哪一個推論端點（見 CacheModes）。省略時用 CacheBlend。
+    /// 指定的模式沒有設定端點時會拋 <see cref="CacheModeUnavailableException"/>，
+    /// 不會靜默退回預設——否則使用者以為在比較兩種快取，實際打的是同一個引擎。
+    /// </param>
     Task<LLMCompletionResult> GenerateFromTokensAsync(
         IReadOnlyList<int> promptTokens,
         CancellationToken cancellationToken = default,
-        int? maxTokens = null);
+        int? maxTokens = null,
+        string? cacheMode = null);
+}
+
+/// <summary>指定的快取模式沒有可用的端點。對應 HTTP 503。</summary>
+public sealed class CacheModeUnavailableException : Exception
+{
+    public string Mode { get; }
+
+    public CacheModeUnavailableException(string mode, string message) : base(message)
+    {
+        Mode = mode;
+    }
 }
 
 public class LLMService : ILLMService
@@ -56,16 +73,19 @@ public class LLMService : ILLMService
     private readonly RAGSettings _settings;
     private readonly ILogger<LLMService> _logger;
     private readonly ILMCacheService? _cacheService;
+    private readonly ILlmEndpointRegistry _endpoints;
 
     public LLMService(
         IHttpClientFactory httpClientFactory,
         IOptions<RAGSettings> settings,
+        ILlmEndpointRegistry endpoints,
         ILogger<LLMService> logger,
         ILMCacheService? cacheService = null)
     {
         _settings = settings.Value;
         _httpClient = httpClientFactory.CreateClient();
         _httpClient.Timeout = TimeSpan.FromSeconds(_settings.LlmTimeoutSeconds);
+        _endpoints = endpoints;
         _logger = logger;
         _cacheService = cacheService;
     }
@@ -88,19 +108,33 @@ public class LLMService : ILLMService
     public async Task<LLMCompletionResult> GenerateFromTokensAsync(
         IReadOnlyList<int> promptTokens,
         CancellationToken cancellationToken = default,
-        int? maxTokens = null)
+        int? maxTokens = null,
+        string? cacheMode = null)
     {
         var totalStopwatch = System.Diagnostics.Stopwatch.StartNew();
         var result = new LLMCompletionResult();
+
+        var mode = CacheModes.Normalize(cacheMode);
+        var baseUrl = _endpoints.ResolveBaseUrl(mode);
+
+        if (string.IsNullOrWhiteSpace(baseUrl))
+        {
+            throw new CacheModeUnavailableException(mode,
+                $"「{CacheModes.DisplayName(mode)}」沒有設定推論端點。" +
+                "單張卡放不下三個模型實例，預設只常駐 CacheBlend 與純 LMCache；" +
+                "需要這個模式請先由管理者啟動對應的 vLLM 實例。");
+        }
 
         // C# 層的回答快取。預設關閉——它一命中就不會送到推論引擎，TTFT 記成 0，
         // 量到的不是 CacheBlend 省下的時間。見 RAGSettings.LmcacheEnabled 的說明。
         string? cacheKey = null;
         if (_cacheService is { IsEnabled: true })
         {
+            // 鍵要含快取模式，否則切換模式時會拿到另一個引擎的舊答案，
+            // 使用者以為在比較兩種快取，看到的卻是同一筆回應。
             cacheKey = LMCacheService.GenerateCacheKey(
                 string.Join(',', promptTokens.Take(64)),
-                promptTokens.Count.ToString());
+                $"{promptTokens.Count}:{mode}");
 
             var cached = _cacheService.Get(cacheKey);
             if (cached != null)
@@ -116,7 +150,7 @@ public class LLMService : ILLMService
             }
         }
 
-        var url = $"{_settings.LlmBaseUrl.TrimEnd('/')}/v1/completions";
+        var url = $"{baseUrl.TrimEnd('/')}/v1/completions";
         var body = new CompletionRequest
         {
             Model = _settings.LlmModel,

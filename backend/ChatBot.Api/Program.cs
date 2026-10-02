@@ -59,8 +59,16 @@ builder.Services.AddHttpClient("Embedding", client =>
 });
 builder.Services.AddScoped<IEmbeddingService, EmbeddingService>();
 
+// 快取模式 → vLLM 端點的對應與可用性探測。
+// Singleton：探測結果要跨請求共用，不然每次開頁面都打三次健康檢查。
+builder.Services.AddSingleton<ILlmEndpointRegistry, LlmEndpointRegistry>();
+
 // Register LLM service for RAG response generation
 builder.Services.AddScoped<ILLMService, LLMService>();
+
+// 聊天室紀錄。Singleton：內部持有 NpgsqlDataSource（連線池），
+// 每個請求各建一個會把連線池的意義抵銷掉。
+builder.Services.AddSingleton<IConversationStore, ConversationStore>();
 
 // Tokenizer 與 prompt 組裝（CacheBlend 需要以 token id 送出請求）
 // TokenizerClient 為 Singleton：它對固定文字（系統提示詞、分隔符、條文片段）
@@ -93,6 +101,27 @@ builder.Services.AddSingleton(sp => new QdrantClient(
     port: grpcPort));
 
 var app = builder.Build();
+
+// 聊天室資料表。冪等的 CREATE TABLE IF NOT EXISTS，重複執行無害。
+//
+// 失敗不讓服務起不來：資料庫是聊天紀錄用的，問答本身不依賴它。
+// 因為這個失敗而讓整個後端無法啟動，等於把次要功能的故障
+// 升級成主要功能的故障。聊天室端點會各自回 503 說明狀況。
+using (var scope = app.Services.CreateScope())
+{
+    var store = scope.ServiceProvider.GetRequiredService<IConversationStore>();
+    var log = scope.ServiceProvider.GetRequiredService<ILoggerFactory>()
+                   .CreateLogger("Startup");
+    try
+    {
+        await store.EnsureSchemaAsync();
+    }
+    catch (Exception ex)
+    {
+        log.LogError(ex,
+            "聊天室資料表建立失敗，聊天紀錄功能將不可用。問答不受影響");
+    }
+}
 
 // Configure the HTTP request pipeline.
 if (app.Environment.IsDevelopment())

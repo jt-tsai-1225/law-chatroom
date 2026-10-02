@@ -20,6 +20,12 @@
     -->
     <PackageReference Include="AWSSDK.S3" Version="3.7.*" />
     <PackageReference Include="Qdrant.Client" Version="1.9.0" />
+    <!--
+      聊天室紀錄用。選 Npgsql 直連而非 EF Core：只有兩張表、沒有複雜關聯，
+      為此在 k8s 裡多養一個 migration job 不划算。結構以冪等的
+      CREATE TABLE IF NOT EXISTS 在啟動時建立（見 Services/ConversationStore.cs）。
+    -->
+    <PackageReference Include="Npgsql" Version="8.0.5" />
     <PackageReference Include="Swashbuckle.AspNetCore" Version="6.5.0" />
   </ItemGroup>
 

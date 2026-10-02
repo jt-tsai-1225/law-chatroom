@@ -30,6 +30,7 @@ public class ChatBotService : IChatBotService
     private readonly IPromptBuilder _promptBuilder;
     private readonly ILLMService _llmService;
     private readonly IChunkCacheTracker _cacheTracker;
+    private readonly IConversationStore _conversations;
     private readonly RAGSettings _settings;
     private readonly ILogger<ChatBotService> _logger;
 
@@ -42,6 +43,7 @@ public class ChatBotService : IChatBotService
         IPromptBuilder promptBuilder,
         ILLMService llmService,
         IChunkCacheTracker cacheTracker,
+        IConversationStore conversations,
         IOptions<RAGSettings> settings,
         ILogger<ChatBotService> logger)
     {
@@ -50,6 +52,7 @@ public class ChatBotService : IChatBotService
         _promptBuilder = promptBuilder;
         _llmService = llmService;
         _cacheTracker = cacheTracker;
+        _conversations = conversations;
         _settings = settings.Value;
         _logger = logger;
     }
@@ -72,11 +75,20 @@ public class ChatBotService : IChatBotService
             totalStopwatch.Stop();
             _logger.LogWarning("知識庫沒有檢索到任何條文，問題：{Message}", request.Message);
 
-            return new ChatResponse
+            // 這一輪也要進聊天室。少了它，使用者回頭看紀錄會發現自己
+            // 問過的問題憑空消失，以為是系統吃掉了訊息。
+            var empty = new ChatResponse
             {
                 Reply = $"查無相關條文，無法回答這個問題。\n\n{Disclaimer}",
-                TotalMilliseconds = totalStopwatch.ElapsedMilliseconds
+                TotalMilliseconds = totalStopwatch.ElapsedMilliseconds,
+                ConversationId = request.ConversationId,
+                CacheMode = CacheModes.Normalize(request.CacheMode)
             };
+
+            empty.Persisted = await PersistAsync(
+                request, empty, "查無相關條文，無法回答這個問題。", cancellationToken);
+
+            return empty;
         }
 
         var chunks = searchResults
@@ -132,8 +144,15 @@ public class ChatBotService : IChatBotService
                 .ToList();
         }
 
-        var prompt = await _promptBuilder.BuildAsync(ordered, request.Message, cancellationToken);
-        var llmResult = await _llmService.GenerateFromTokensAsync(prompt.Tokens, cancellationToken);
+        var history = await LoadHistoryAsync(request.ConversationId, cancellationToken);
+
+        var prompt = await _promptBuilder.BuildAsync(
+            ordered, request.Message, history, cancellationToken);
+
+        // 注意：上面已經有一個 mode 是片段排列模式，兩者不同，別混用
+        var cacheMode = CacheModes.Normalize(request.CacheMode);
+        var llmResult = await _llmService.GenerateFromTokensAsync(
+            prompt.Tokens, cancellationToken, cacheMode: cacheMode);
 
         // 純前綴快取在本次請求能命中的上限。缺少這個對照，
         // 「命中率 99.98%」無法區分究竟是 blend 生效還是單純的前綴複用。
@@ -150,7 +169,7 @@ public class ChatBotService : IChatBotService
             throw new InvalidOperationException("推論引擎回傳空內容");
         }
 
-        return new ChatResponse
+        var response = new ChatResponse
         {
             Reply = $"📜 **法律諮詢回覆：**\n\n{llmResult.Content}\n\n{Disclaimer}",
             TtftMilliseconds = llmResult.TtftMilliseconds,
@@ -169,8 +188,107 @@ public class ChatBotService : IChatBotService
             PrefixOnlyCeilingTokens = prefixCeiling,
             CachedOverPrefixCeiling = prefixCeiling > 0
                 ? Math.Round((double)llmResult.CachedTokens / prefixCeiling, 2)
-                : 0
+                : 0,
+            ConversationId = request.ConversationId,
+            HistoryMessagesUsed = prompt.HistoryMessagesUsed,
+            CacheMode = cacheMode
         };
+
+        response.Persisted = await PersistAsync(
+            request, response, llmResult.Content, cancellationToken);
+
+        return response;
+    }
+
+    /// <summary>
+    /// 取出要帶進 prompt 的對話歷史。
+    ///
+    /// 沒有指定聊天室、或資料庫沒設定時回 null——那等於單輪問答，
+    /// 與加入聊天室功能之前的行為完全相同。
+    ///
+    /// 讀取失敗不讓問答失敗：少了上下文的回答仍然有用，
+    /// 比起因為讀不到歷史而整個請求失敗好得多。
+    /// </summary>
+    private async Task<List<ConversationTurn>?> LoadHistoryAsync(
+        Guid? conversationId, CancellationToken ct)
+    {
+        if (conversationId is null
+            || !_conversations.IsConfigured
+            || _settings.MaxHistoryMessages <= 0)
+        {
+            return null;
+        }
+
+        try
+        {
+            var messages = await _conversations.RecentMessagesAsync(
+                conversationId.Value, _settings.MaxHistoryMessages, ct);
+
+            return messages
+                .Select(m => new ConversationTurn(m.Role, m.Content))
+                .ToList();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex,
+                "讀取聊天室 {Id} 的歷史失敗，本次以單輪方式回答", conversationId);
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// 把這一輪的提問與回答寫進聊天室。
+    ///
+    /// 存的是**模型原始輸出**（rawReply），不是 response.Reply——後者帶著
+    /// 「法律諮詢回覆」標題與免責聲明，那是呈現用的裝飾，存進去會在下一輪
+    /// 被當成上下文送回模型。
+    ///
+    /// 回傳是否成功。失敗只記錄不拋出：使用者已經拿到回答了。
+    /// </summary>
+    private async Task<bool> PersistAsync(
+        ChatRequest request, ChatResponse response, string rawReply, CancellationToken ct)
+    {
+        if (request.ConversationId is null || !_conversations.IsConfigured)
+        {
+            return false;
+        }
+
+        var id = request.ConversationId.Value;
+
+        try
+        {
+            await _conversations.AppendAsync(new ConversationMessage
+            {
+                ConversationId = id,
+                Role = "user",
+                Content = request.Message
+            }, ct);
+
+            await _conversations.AppendAsync(new ConversationMessage
+            {
+                ConversationId = id,
+                Role = "assistant",
+                Content = rawReply,
+                CacheMode = response.CacheMode,
+                ChunkOrder = response.ChunkOrderApplied,
+                TtftMs = (int)response.TtftMilliseconds,
+                TotalMs = (int)response.TotalMilliseconds,
+                PromptTokens = response.PromptTokens,
+                CachedTokens = response.CachedTokens,
+                CacheHitRate = response.CacheHitRate,
+                PrefixCeilingTokens = response.PrefixOnlyCeilingTokens,
+                CachedOverPrefixCeiling = response.CachedOverPrefixCeiling,
+                RetrievedArticles = response.RetrievedArticles
+            }, ct);
+
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex,
+                "聊天室 {Id} 的訊息寫入失敗。回答已經產生，僅未保存", id);
+            return false;
+        }
     }
 
     /// <summary>

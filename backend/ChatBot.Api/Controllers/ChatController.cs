@@ -35,6 +35,14 @@ public class ChatController : ControllerBase
             var response = await _chatBotService.GetReplyAsync(request);
             return Ok(response);
         }
+        catch (CacheModeUnavailableException ex)
+        {
+            // 這不是伺服器錯誤，是使用者選了一個目前沒有部署的模式。
+            // 回 503 並說明原因，讓前端能顯示「這個模式尚未啟動」而不是
+            // 一句無從查起的「發生錯誤」。
+            _logger.LogWarning("快取模式 {Mode} 不可用：{Message}", ex.Mode, ex.Message);
+            return StatusCode(503, new { error = ex.Message, mode = ex.Mode });
+        }
         catch (Exception ex)
         {
             _logger.LogError(ex, "Error processing chat request");

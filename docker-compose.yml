@@ -113,8 +113,12 @@ services:
       - "32648"
       - --max-num-batched-tokens            # 必須大於最長 prompt，否則會被截斷
       - "32768"
+      # ⚠ 這張卡上現在有兩個實例（CacheBlend 與純 LMCache），各佔 0.45。
+      #   只跑一個實例時可以設回 0.9（KV 池 210,092 tokens，約 46 條同時序列）；
+      #   兩個實例時 0.45 的 KV 池約 32,900 tokens，單一對話綽綽有餘。
+      #   兩者相加不可超過約 0.95，否則載入模型時就 OOM。
       - --gpu-memory-utilization
-      - "0.7"
+      - "${GPU_UTIL_EACH:-0.45}"
       - --enforce-eager                     # CacheBlend 不支援 CUDA Graph（issue #2639）
 
     healthcheck:
@@ -126,6 +130,119 @@ services:
       retries: 40        # 模型載入可能一兩分鐘，retries 要給夠
       start_period: 60s
 
+  # ────────────────────────────────────────────────────────────
+  #  推論引擎（第二個）：純 LMCache，不開 blending
+  #
+  #  存在的理由是讓介面能即時切換、當場比較兩種快取。
+  #
+  #  ⚠ 為什麼只有兩個實例而不是三個：
+  #    Mistral-7B fp16 的權重每份約 14 GB，三份就 43.5 GB，
+  #    48 GB 的卡連 KV 池都不剩。「無快取」那一組請用
+  #    deploy/switch-nocache.sh 按需切換（會停掉這一個）。
+  #
+  #  ⚠ 兩個實例各自有一份 L1 快取，CPU 記憶體需求是加倍的。
+  #    334 段約需 29 GB，兩份就是 58 GB 以上。啟動前先 `free -g` 確認，
+  #    不夠的話把 L1_SIZE_GB 調小——但不可低於語料實際需要的量，
+  #    因為觸發淘汰是引擎終止而不是降級（issue #4133）。
+  # ────────────────────────────────────────────────────────────
+  vllm-lmcache:
+    container_name: lmcache-vllm
+    image: lmcache/vllm-openai:v0.5.1
+    restart: unless-stopped
+    networks: [lawnet]
+    ports:
+      - "8001:8000"
+    ipc: host
+
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ['0']
+              capabilities: [gpu]
+
+    volumes:
+      - ${MODEL_DIR:-/mnt/nvme0/mistral-model}:/root/.cache/huggingface
+      # ⚠ L2 一定要跟 CacheBlend 那個實例分開。
+      #   兩個行程寫同一個 LevelDB 目錄會壞檔，而且壞得很難看出來。
+      - ${L2_LMCACHE_DIR:-/mnt/nvme0/mistral-fs-lmcache}:${L2_LMCACHE_DIR:-/mnt/nvme0/mistral-fs-lmcache}
+      # 補丁照掛但不啟用（不設 BLEND_REGISTER_PATCH），讓兩個實例的
+      # 環境盡量一致，差異只剩「有沒有開 blending」這一項。
+      - ${PATCH_DIR:-/home/oem/blend-patches}/gpu_worker_v0240.py:/opt/venv/lib/python3.12/site-packages/vllm/v1/worker/gpu_worker.py:ro
+      - ${PATCH_DIR:-/home/oem/blend-patches}/lmc_models_utils_v0240.py:/opt/venv/lib/python3.12/site-packages/lmcache/v1/compute/models/utils.py:ro
+
+    environment:
+      PYTHONHASHSEED: "0"
+      VLLM_SERVER_DEV_MODE: "1"
+
+      # 這個模式下 CHUNK_SIZE 才真正起作用（blend 模式會走另一條路徑）
+      LMCACHE_CHUNK_SIZE: "256"
+
+      LMCACHE_LOCAL_CPU: "True"
+      LMCACHE_MAX_LOCAL_CPU_SIZE: "${L1_SIZE_GB:-35}"
+      LMCACHE_LOCAL_DISK: "file://${L2_LMCACHE_DIR:-/mnt/nvme0/mistral-fs-lmcache}/"
+      LMCACHE_MAX_LOCAL_DISK_SIZE: "${L2_SIZE_GB:-35}"
+
+    entrypoint: ["vllm"]
+    command:
+      - serve
+      - ${LLM_MODEL:-mistralai/Mistral-7B-Instruct-v0.2}
+      - --kv-transfer-config
+      - '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_both"}'
+      - --tensor-parallel-size
+      - "1"
+      - --no-enable-prefix-caching
+      - --enable-prompt-tokens-details
+      - --max-model-len
+      - "32648"
+      - --max-num-batched-tokens
+      - "32768"
+      # 兩個實例共用一張卡，各佔 0.45。單一對話下 KV 池約 32,900 tokens，
+      # 綽綽有餘；而 TTFT 只看命中與否、不看池子大小，展示的數字仍與報告一致。
+      - --gpu-memory-utilization
+      - "${GPU_UTIL_EACH:-0.45}"
+      # 三組都保留，不讓「有沒有 CUDA Graph」混進比較
+      - --enforce-eager
+
+    healthcheck:
+      test: ["CMD", "python3", "-c",
+             "import urllib.request; urllib.request.urlopen('http://localhost:8000/v1/models')"]
+      interval: 15s
+      timeout: 5s
+      retries: 40
+      start_period: 60s
+
+  # ────────────────────────────────────────────────────────────
+  #  聊天紀錄
+  # ────────────────────────────────────────────────────────────
+  postgres:
+    container_name: law-postgres
+    image: postgres:16-alpine
+    restart: unless-stopped
+    networks: [lawnet]
+    # 不發佈主機埠：只有後端需要連，發佈出去只是多一個對外面。
+    # 要在 193 上用 psql 查資料請用 `docker compose exec postgres psql -U lawchat lawchat`。
+
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-lawchat}
+      POSTGRES_USER: ${POSTGRES_USER:-lawchat}
+      # ⚠ 密碼由 ENV_FILE（預設 ~/.law-env）提供，不寫進 repo。
+      #   沒設定的話 postgres 會拒絕啟動，這是刻意的——預設密碼比沒密碼更糟。
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?請在 .env 或 ~/.law-env 設定 POSTGRES_PASSWORD}
+      # 初始化時用 scram-sha-256，不要 trust
+      POSTGRES_INITDB_ARGS: "--auth-host=scram-sha-256"
+
+    volumes:
+      # 與其他資料一樣放在 git 儲存庫之外
+      - ${POSTGRES_DIR:-/home/oem/law-chatroom-data/postgres}:/var/lib/postgresql/data
+
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-lawchat} -d ${POSTGRES_DB:-lawchat}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
   # ────────────────────────────────────────────────────────────
   #  向量資料庫
   # ────────────────────────────────────────────────────────────
@@ -192,6 +309,16 @@ services:
       ASPNETCORE_ENVIRONMENT: Development   # 顯示詳細錯誤，並啟用 Swagger (/docs)
       RAGSettings__QdrantHost: law-qdrant
       RAGSettings__LlmBaseUrl: "http://${HOST_IP:-10.102.197.193}:8000"
+
+      # 快取模式 → 端點。走容器名稱而非主機 IP，少繞一跳也不依賴對外埠。
+      # "none" 沒有常駐實例，刻意不設——後端會據此回報「尚未啟動」，
+      # 而不是靜默退回 CacheBlend 讓人以為在比較兩種快取。
+      RAGSettings__LlmEndpoints__cacheblend: "http://blend-vllm-024:8000"
+      RAGSettings__LlmEndpoints__lmcache: "http://lmcache-vllm:8000"
+
+      # 聊天紀錄。密碼來自 ENV_FILE 的 POSTGRES_PASSWORD。
+      ConnectionStrings__Postgres: "Host=law-postgres;Port=5432;Database=${POSTGRES_DB:-lawchat};Username=${POSTGRES_USER:-lawchat};Password=${POSTGRES_PASSWORD:?請設定 POSTGRES_PASSWORD}"
+
       # 新版 AWS SDK 預設附加 CRC32 校驗和，部分 S3 相容實作會因此簽章失敗
       AWS_REQUEST_CHECKSUM_CALCULATION: when_required
 
@@ -203,10 +330,17 @@ services:
     depends_on:
       vllm:
         condition: service_healthy
+      # 第二個引擎不設 service_healthy：它不是問答的必要條件，
+      # 等它就緒只會讓整體啟動多花一兩分鐘。沒起來的話後端會把
+      # 「純 LMCache」標成不可用，而不是讓整個服務起不來。
+      vllm-lmcache:
+        condition: service_started
       qdrant:
         condition: service_started
       seaweedfs:
         condition: service_started
+      postgres:
+        condition: service_healthy
 
     healthcheck:
       # 這個端點只碰 Qdrant，不會送任何 prompt 給模型、不污染 KV 快取。

@@ -188,4 +188,46 @@ public class RAGSettings
     public int LmcacheMaxEntries { get; set; } = 1000;
     public int LmcacheDefaultTtlMinutes { get; set; } = 60;
     public string LmcacheStorageType { get; set; } = "memory";
+
+    // ── 多端點（快取模式切換）────────────────────────────────────────
+
+    /// <summary>
+    /// 快取模式 → vLLM 端點。鍵為 "cacheblend" / "lmcache" / "none"。
+    ///
+    /// 留空時退回單一端點 LlmBaseUrl，只有 CacheBlend 可用——既有部署
+    /// 不改設定也能照常運作。
+    ///
+    /// ⚠ 一張 48 GB 的卡放不下三個實例：Mistral-7B fp16 權重每份約 14 GB，
+    ///   三份 43.5 GB，連 KV 池都不剩。實測建議：
+    ///
+    ///     cacheblend  :8000   --gpu-memory-utilization 0.45
+    ///     lmcache     :8001   --gpu-memory-utilization 0.45
+    ///     none        :8002   需停掉上面其中一個才啟得動
+    ///
+    ///   單一對話下 0.45 的 KV 池約 32,900 tokens，綽綽有餘；
+    ///   而 TTFT 只看命中與否、不看池子大小，所以展示的數字仍與報告一致。
+    /// </summary>
+    public Dictionary<string, string>? LlmEndpoints { get; set; }
+
+    // ── 多輪對話 ────────────────────────────────────────────────────
+
+    /// <summary>
+    /// 送進模型的對話歷史最多幾則（使用者與助理各算一則）。
+    /// 8 則約等於 4 輪問答。
+    ///
+    /// 設 0 等於關閉多輪——每次提問都獨立，快取行為與單輪時完全一致。
+    /// </summary>
+    public int MaxHistoryMessages { get; set; } = 8;
+
+    /// <summary>
+    /// prompt 的 token 上限。超過時 PromptBuilder 會從最早的歷史開始丟。
+    ///
+    /// ⚠ 必須小於 vLLM 的 --max-model-len（目前 32648），而且要留出生成的空間。
+    ///   本值加上 LlmMaxTokens 若超過 max-model-len，引擎會直接拒絕請求。
+    ///   24576 + 1024 = 25600，離 32648 還有餘裕。
+    ///
+    /// 這同時也是容量參數：prompt 越長，同時能服務的人越少
+    ///（GPU KV 池 210,092 tokens ÷ 每條序列的 token 數）。
+    /// </summary>
+    public int MaxPromptTokens { get; set; } = 24576;
 }

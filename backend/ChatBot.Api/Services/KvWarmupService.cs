@@ -107,7 +107,10 @@ public class KvWarmupService : IKvWarmupService
 
             try
             {
-                var prompt = await _promptBuilder.BuildAsync(chunks, WarmupQuestion, ct);
+                // 預熱不帶對話歷史：要寫進快取的是條文片段的 KV，
+                // 帶歷史只會讓最後那一段每次都不同，沒有任何好處。
+                var prompt = await _promptBuilder.BuildAsync(
+                    chunks, WarmupQuestion, cancellationToken: ct);
                 var result = await _llm.GenerateFromTokensAsync(prompt.Tokens, ct, maxTokens: 1);
 
                 state.TotalPromptTokens += result.PromptTokens;
