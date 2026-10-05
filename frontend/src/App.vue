@@ -750,12 +750,17 @@ onUnmounted(stopPolling)
         </p>
 
         <!--
-          預熱只會寫進「目前選到的」那個引擎。兩個引擎各有自己的快取，
-          不講明的話切換模式後第一題變慢會被當成 CacheBlend 沒生效。
+          預熱只打 CacheBlend 端點：後端的預熱請求不帶快取模式，走預設端點。
+          先前這裡寫成「對目前選定的端點生效」，是錯的——選 LMCache 後按預熱，
+          寫進去的仍是 CacheBlend。
+          LMCache 是前綴快取，預熱用的是「多個片段串接」的 prompt，
+          與日後逐題組出的 prompt 前綴不同，預熱不會讓它命中；
+          它的快取由實際提問自然累積，所以也不需要預熱。
         -->
         <p class="hint">
-          <strong>預熱只對目前選定的推論端點生效。</strong>
-          切換快取模式後，新的端點需要各自預熱一次。
+          <strong>預熱只對 CacheBlend 生效。</strong>
+          純 LMCache 是前綴快取，靠實際提問自然累積，不需要也無法預熱；
+          無快取則沒有快取可熱。
         </p>
 
         <div v-if="warming" class="state">預熱中，這可能需要一到兩分鐘…</div>
