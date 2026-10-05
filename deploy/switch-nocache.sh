@@ -24,6 +24,7 @@ PORT=8002
 MODEL_DIR=${MODEL_DIR:-/mnt/nvme0/mistral-model}
 LLM_MODEL=${LLM_MODEL:-mistralai/Mistral-7B-Instruct-v0.2}
 UTIL=${GPU_UTIL_EACH:-0.45}
+API=${API:-http://localhost:8080}
 
 # 環境檔：docker compose 不會自己讀 ~/.law-env，沒帶 --env-file 的話
 # 會因為缺 POSTGRES_PASSWORD 而整個失敗（compose 檔裡該變數是必填）。
@@ -51,12 +52,41 @@ start_nocache() {
       --enforce-eager >/dev/null
 }
 
+# 等端點就緒，並印出進度。載入模型要一兩分鐘，靜靜等的話
+# 很容易被當成卡住而中斷——中斷後 docker run -d 起的容器還在背景載入，
+# 狀態就變得難以判斷。
 wait_ready() {
   local url=$1 n=0
+  printf '  等待 %s ' "$url"
   until curl -sf -o /dev/null --max-time 3 "$url/v1/models"; do
-    sleep 3; n=$((n+1))
-    [ $n -gt 60 ] && { echo "逾時：$url"; return 1; }
+    printf '.'; sleep 3; n=$((n+1))
+    [ $n -gt 80 ] && { echo; echo "逾時：$url"; return 1; }
   done
+  echo ' 就緒'
+}
+
+wait_api() {
+  local n=0
+  printf '  等待後端 '
+  until curl -sf -o /dev/null --max-time 3 "$API/api/cachemodes"; do
+    printf '.'; sleep 3; n=$((n+1))
+    [ $n -gt 40 ] && { echo; echo "逾時：後端沒有回應"; return 1; }
+  done
+  echo ' 就緒'
+}
+
+# 端點設定寫進環境檔。一律用 --no-deps 重建後端：
+# 後端依賴 vllm-lmcache，沒有 --no-deps 的話 compose 會把剛停掉的
+# LMCache 又拉起來，三個引擎同時搶 GPU 0 而互相啟動失敗。
+set_none_endpoint() {
+  grep -q '^RAGSettings__LlmEndpoints__none=' "$ENV_FILE" 2>/dev/null ||
+    echo "RAGSettings__LlmEndpoints__none=http://$NAME:8000" >> "$ENV_FILE"
+  "${DC[@]}" up -d --no-deps backend >/dev/null
+}
+
+clear_none_endpoint() {
+  [ -f "$ENV_FILE" ] && sed -i '/^RAGSettings__LlmEndpoints__none=/d' "$ENV_FILE"
+  "${DC[@]}" up -d --no-deps backend >/dev/null
 }
 
 case "${1:-status}" in
@@ -66,23 +96,24 @@ case "${1:-status}" in
     echo "啟動無快取引擎（埠 $PORT）…"
     start_nocache
     wait_ready "http://localhost:$PORT"
+    echo "把端點告訴後端並重建（--no-deps，不會把 LMCache 拉起來）…"
+    set_none_endpoint
+    wait_api
     echo
-    echo "完成。還要把端點告訴後端——在 .env 或 ~/.law-env 加上："
-    echo "  RAGSettings__LlmEndpoints__none=http://$NAME:8000"
-    echo "然後 docker compose up -d backend"
-    echo
-    echo "⚠ 此時「純 LMCache」模式會變成不可用，介面上會標示出來。"
+    echo "完成。「無快取」已可選用；「純 LMCache」目前不可用，介面會標示。"
     ;;
 
   off)
     echo "停掉無快取引擎…"
     docker rm -f "$NAME" >/dev/null 2>&1 || true
     echo "起回純 LMCache…"
-    "${DC[@]}" up -d vllm-lmcache
+    "${DC[@]}" up -d vllm-lmcache >/dev/null
     wait_ready "http://localhost:8001"
+    echo "移除無快取端點並重建後端…"
+    clear_none_endpoint
+    wait_api
     echo
-    echo "完成。記得把 RAGSettings__LlmEndpoints__none 從設定移除，"
-    echo "否則介面會列出一個連不到的模式。"
+    echo "完成。LMCache 的快取是空的，會隨提問重新累積。"
     ;;
 
   status)
