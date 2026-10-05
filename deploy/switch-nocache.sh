@@ -25,8 +25,13 @@ MODEL_DIR=${MODEL_DIR:-/mnt/nvme0/mistral-model}
 LLM_MODEL=${LLM_MODEL:-mistralai/Mistral-7B-Instruct-v0.2}
 UTIL=${GPU_UTIL_EACH:-0.45}
 
-# .env 若存在就讀進來，讓路徑與上面的預設一致
+# 環境檔：docker compose 不會自己讀 ~/.law-env，沒帶 --env-file 的話
+# 會因為缺 POSTGRES_PASSWORD 而整個失敗（compose 檔裡該變數是必填）。
+ENV_FILE=${ENV_FILE:-$HOME/.law-env}
 [ -f .env ] && set -a && . ./.env && set +a
+[ -f "$ENV_FILE" ] && set -a && . "$ENV_FILE" && set +a
+DC=(docker compose)
+[ -f "$ENV_FILE" ] && DC=(docker compose --env-file "$ENV_FILE")
 
 start_nocache() {
   docker rm -f "$NAME" >/dev/null 2>&1 || true
@@ -57,7 +62,7 @@ wait_ready() {
 case "${1:-status}" in
   on)
     echo "停掉純 LMCache，讓出記憶體…"
-    docker compose stop vllm-lmcache
+    "${DC[@]}" stop vllm-lmcache
     echo "啟動無快取引擎（埠 $PORT）…"
     start_nocache
     wait_ready "http://localhost:$PORT"
@@ -73,7 +78,7 @@ case "${1:-status}" in
     echo "停掉無快取引擎…"
     docker rm -f "$NAME" >/dev/null 2>&1 || true
     echo "起回純 LMCache…"
-    docker compose up -d vllm-lmcache
+    "${DC[@]}" up -d vllm-lmcache
     wait_ready "http://localhost:8001"
     echo
     echo "完成。記得把 RAGSettings__LlmEndpoints__none 從設定移除，"

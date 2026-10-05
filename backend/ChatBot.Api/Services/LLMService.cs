@@ -175,8 +175,24 @@ public class LLMService : ILLMService
 
         // ResponseHeadersRead 是量到真實 TTFT 的關鍵：預設的 ResponseContentRead
         // 會等整個回應收完才返回，那樣量到的其實是總耗時。
-        using var response = await _httpClient.SendAsync(
-            request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
+        //
+        // 連線層的失敗（容器沒起、DNS 解不到）要轉成「模式不可用」，
+        // 否則使用者只會看到一句無法判讀的 500。端點有回應但回錯誤碼的情況
+        // 不在此列，那是引擎本身的問題，維持下面原本的處理。
+        HttpResponseMessage response;
+        try
+        {
+            response = await _httpClient.SendAsync(
+                request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
+        }
+        catch (HttpRequestException ex)
+        {
+            _logger.LogError(ex, "連不上推論端點 {Url}（模式 {Mode}）", url, mode);
+            throw new CacheModeUnavailableException(mode,
+                $"連不上「{CacheModes.DisplayName(mode)}」的推論端點，容器可能尚未啟動或已停止。");
+        }
+
+        using var responseScope = response;
 
         if (!response.IsSuccessStatusCode)
         {
