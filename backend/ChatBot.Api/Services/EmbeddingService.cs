@@ -23,7 +23,9 @@ public class EmbeddingService : IEmbeddingService
 
     public EmbeddingService(IHttpClientFactory httpClientFactory, IOptions<RAGSettings> settings)
     {
-        _httpClient = httpClientFactory.CreateClient();
+        // 必須用具名 "Embedding" client：30 秒逾時註冊在它身上（Program.cs）。
+        // 未具名的 CreateClient() 會拿到 100 秒預設值，那個逾時設定等於沒生效。
+        _httpClient = httpClientFactory.CreateClient("Embedding");
         _settings = settings.Value;
     }
 
