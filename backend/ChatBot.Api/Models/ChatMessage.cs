@@ -157,6 +157,12 @@ public class ChatResponse
     /// <summary>本次實際帶進 prompt 的歷史訊息則數。</summary>
     public int HistoryMessagesUsed { get; set; }
 
+    /// <summary>
+    /// 本次檢索是否另外納入了上一個提問（追問補強）。
+    /// 為 true 時，RetrievedArticles 可能包含單看這一句話找不到的條文。
+    /// </summary>
+    public bool RetrievalExpandedByHistory { get; set; }
+
     /// <summary>本次實際使用的快取模式："cacheblend" / "lmcache" / "none"。</summary>
     public string CacheMode { get; set; } = "cacheblend";
 }

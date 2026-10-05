@@ -64,11 +64,12 @@ public class ChatBotService : IChatBotService
 
         await _qdrantService.InitializeCollectionAsync();
 
-        var queryVector = await _embeddingService.GenerateEmbeddingAsync(
-            request.Message, cancellationToken);
+        // 歷史要在檢索之前就讀出來：追問（「那如果房東不退還呢？」）單看最後
+        // 一句話檢索不到相關條文，需要把上一個提問一起納入。
+        var history = await LoadHistoryAsync(request.ConversationId, cancellationToken);
 
-        var searchResults = await _qdrantService.SearchSimilarAsync(
-            "legal_documents", queryVector, topK: _settings.RetrievalTopK);
+        var (searchResults, expandedByHistory) = await RetrieveAsync(
+            request.Message, history, cancellationToken);
 
         if (searchResults.Count == 0)
         {
@@ -145,8 +146,6 @@ public class ChatBotService : IChatBotService
                 .ToList();
         }
 
-        var history = await LoadHistoryAsync(request.ConversationId, cancellationToken);
-
         var prompt = await _promptBuilder.BuildAsync(
             ordered, request.Message, history, cancellationToken);
 
@@ -193,6 +192,7 @@ public class ChatBotService : IChatBotService
                 : 0,
             ConversationId = request.ConversationId,
             HistoryMessagesUsed = prompt.HistoryMessagesUsed,
+            RetrievalExpandedByHistory = expandedByHistory,
             CacheMode = cacheMode
         };
 
@@ -200,6 +200,62 @@ public class ChatBotService : IChatBotService
             request, response, llmResult.Content, cancellationToken);
 
         return response;
+    }
+
+    /// <summary>
+    /// 檢索條文。有歷史時多做一次「上一個提問＋本次提問」的檢索並合併。
+    ///
+    /// 合併規則：同一個片段取較高的分數，依分數由高到低取前 topK。
+    /// 兩次檢索用的是同一個集合與同一個向量空間，分數可以直接比較。
+    ///
+    /// 沒有歷史（或設定關閉）時只做原本那一次，行為、延遲與以前完全相同。
+    /// 第二次的 embedding 與第一次平行發出，不會讓追問多等一次來回。
+    /// </summary>
+    private async Task<(List<(KnowledgeSearchResult Result, double Score)> Results, bool Expanded)>
+        RetrieveAsync(string message, List<ConversationTurn>? history, CancellationToken ct)
+    {
+        const string collection = "legal_documents";
+        var topK = _settings.RetrievalTopK;
+
+        var previousQuestions = _settings.RetrievalHistoryUserTurns > 0 && history is not null
+            ? history
+                .Where(t => t.Role == "user" && !string.IsNullOrWhiteSpace(t.Content))
+                .TakeLast(_settings.RetrievalHistoryUserTurns)
+                .Select(t => t.Content)
+                .ToList()
+            : new List<string>();
+
+        if (previousQuestions.Count == 0)
+        {
+            var vector = await _embeddingService.GenerateEmbeddingAsync(message, ct);
+            var single = await _qdrantService.SearchSimilarAsync(collection, vector, topK: topK);
+            return (single, false);
+        }
+
+        var combinedText = string.Join("\n", previousQuestions) + "\n" + message;
+
+        var plainTask = _embeddingService.GenerateEmbeddingAsync(message, ct);
+        var combinedTask = _embeddingService.GenerateEmbeddingAsync(combinedText, ct);
+        await Task.WhenAll(plainTask, combinedTask);
+
+        var plain = await _qdrantService.SearchSimilarAsync(collection, plainTask.Result, topK: topK);
+        var combined = await _qdrantService.SearchSimilarAsync(collection, combinedTask.Result, topK: topK);
+
+        var merged = plain.Concat(combined)
+            .GroupBy(r => r.Result.Id)
+            .Select(g => g.OrderByDescending(r => r.Score).First())
+            .OrderByDescending(r => r.Score)
+            .Take(topK)
+            .ToList();
+
+        var plainIds = new HashSet<string>(plain.Select(r => r.Result.Id));
+        var addedByHistory = merged.Count(r => !plainIds.Contains(r.Result.Id));
+
+        _logger.LogInformation(
+            "追問檢索：單句 {Plain} 筆、含上一提問 {Combined} 筆，合併取 {Merged} 筆，其中 {Added} 筆是靠上一提問才找到",
+            plain.Count, combined.Count, merged.Count, addedByHistory);
+
+        return (merged, addedByHistory > 0);
     }
 
     /// <summary>
