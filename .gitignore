@@ -100,3 +100,6 @@ qdrant_storage/
 
 # 後端上傳暫存
 backend/ChatBot.Api/uploads/
+
+# opencode 專案記憶（僅本機使用，不進版控）
+AGENTS.md

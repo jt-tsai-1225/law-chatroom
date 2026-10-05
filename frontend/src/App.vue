@@ -193,6 +193,91 @@ const ORDER_MODES = [
   { value: 'shuffle', label: '完全打亂' }
 ]
 
+/**
+ * 解析一個 SSE 事件區塊（以空行分隔，「event: 名稱」與「data: JSON」各一行）。
+ * 後端 /api/chat/stream 的三種事件：delta（生成中的文字）、done（完整量測）、
+ * error（生成中斷；SSE 開始後無法改 HTTP 狀態碼，錯誤改走事件）。
+ */
+function parseSseBlock(block) {
+  let event = 'message'
+  const dataLines = []
+  for (const line of block.split('\n')) {
+    if (line.startsWith('event:')) {
+      event = line.slice(6).trim()
+    } else if (line.startsWith('data:')) {
+      dataLines.push(line.slice(5).trimStart())
+    }
+  }
+  if (dataLines.length === 0) return null
+  try {
+    return { event, data: JSON.parse(dataLines.join('\n')) }
+  } catch {
+    return null
+  }
+}
+
+/**
+ * 送出問題並以串流讀回回答。onDelta 在每段文字到達時被呼叫。
+ * 回傳 done 事件的資料（與 /api/chat 同一包 ChatResponse）。
+ *
+ * 失敗以 throw 表達：HTTP 狀態碼問題在讀流之前就能發現，掛 err.status
+ * 供呼叫端判斷（503 = 選了未啟動的模式）；串流中的錯誤走 error 事件。
+ */
+async function streamChat(payload, onDelta) {
+  const res = await fetch(`${API}/chat/stream`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload)
+  })
+
+  if (!res.ok) {
+    let message = `HTTP ${res.status}`
+    try {
+      const data = await res.json()
+      if (data?.error) message = data.hint ? `${data.error}（${data.hint}）` : data.error
+    } catch { /* 錯誤內容不一定是 JSON */ }
+    const err = new Error(message)
+    err.status = res.status
+    throw err
+  }
+
+  const reader = res.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+  let done = null
+
+  try {
+    for (;;) {
+      const { done: finished, value } = await reader.read()
+      if (finished) break
+      buffer += decoder.decode(value, { stream: true })
+
+      // 事件以空行分隔；殘缺的最後一段留給下一次 read 補齊
+      let sep
+      while ((sep = buffer.indexOf('\n\n')) >= 0) {
+        const block = buffer.slice(0, sep)
+        buffer = buffer.slice(sep + 2)
+
+        const ev = parseSseBlock(block)
+        if (!ev) continue
+
+        if (ev.event === 'delta') {
+          onDelta(ev.data?.text || '')
+        } else if (ev.event === 'done') {
+          done = ev.data
+        } else if (ev.event === 'error') {
+          throw new Error(ev.data?.error || '生成中斷')
+        }
+      }
+    }
+  } finally {
+    // 中途拋出（error 事件、元件卸載）時把連線收掉，不留半開的 socket
+    if (done === null) reader.cancel().catch(() => {})
+  }
+
+  return done
+}
+
 async function send() {
   const text = draft.value.trim()
   if (!text || sending.value) return
@@ -209,52 +294,68 @@ async function send() {
   sending.value = true
   await scrollDown()
 
-  try {
-    const { data } = await axios.post(`${API}/chat`, {
-      message: text,
-      chunkOrder: chunkOrder.value,
-      cacheMode: cacheMode.value,
-      conversationId: activeId.value
-    })
+  // 串流：先放一個空氣泡，文字一到就長出來。
+  // 量測資料（TTFT、命中率…）在 done 事件才補上，之前統計區不顯示。
+  // 內容用模型原始輸出——資料庫存的也是這一份，用 reply 的話同一則訊息
+  // 在「剛送出」與「重新載入後」會長得不一樣。
+  const bot = { role: 'bot', content: '', at: new Date(), streaming: true, stats: null }
+  messages.value.push(bot)
 
-    messages.value.push({
-      // rawReply 與資料庫存的是同一份；用 reply 的話同一則訊息在
-      // 「剛送出」與「重新載入後」會長得不一樣。
-      role: 'bot',
-      content: data.rawReply || data.reply,
-      at: new Date(),
-      persisted: data.persisted,
-      stats: {
-        ttft: data.ttftMilliseconds,
-        total: data.totalMilliseconds,
-        promptTokens: data.promptTokens,
-        cachedTokens: data.cachedTokens,
-        hitRate: data.cacheHitRate,
-        articles: data.retrievedArticles || [],
-        order: data.chunkOrderApplied,
-        permutation: data.chunkPermutation || [],
-        reordered: data.reorderedForCache,
-        prefixCeiling: data.prefixOnlyCeilingTokens,
-        overPrefix: data.cachedOverPrefixCeiling,
-        tokensPerSecond: data.tokensPerSecond,
-        cacheMode: data.cacheMode,
-        historyUsed: data.historyMessagesUsed
+  try {
+    const done = await streamChat(
+      {
+        message: text,
+        chunkOrder: chunkOrder.value,
+        cacheMode: cacheMode.value,
+        conversationId: activeId.value
+      },
+      t => {
+        bot.content += t
+        scrollDown()
       }
-    })
+    )
+
+    if (!done) throw new Error('連線中斷，答案可能不完整')
+
+    // 查無條文時沒有任何 delta，內容在 done 事件才出現
+    if (!bot.content) bot.content = done.rawReply || done.reply || ''
+    bot.persisted = done.persisted
+    bot.stats = {
+      ttft: done.ttftMilliseconds,
+      total: done.totalMilliseconds,
+      promptTokens: done.promptTokens,
+      cachedTokens: done.cachedTokens,
+      hitRate: done.cacheHitRate,
+      articles: done.retrievedArticles || [],
+      order: done.chunkOrderApplied,
+      permutation: done.chunkPermutation || [],
+      reordered: done.reorderedForCache,
+      prefixCeiling: done.prefixOnlyCeilingTokens,
+      overPrefix: done.cachedOverPrefixCeiling,
+      tokensPerSecond: done.tokensPerSecond,
+      cacheMode: done.cacheMode,
+      historyUsed: done.historyMessagesUsed
+    }
 
     if (firstTurn) await autoTitle(text)
     await refreshActiveSummary()
   } catch (err) {
+    // 已經吐出來的字保留，後面補一則錯誤訊息；一個字都沒有就把空泡泡收掉
+    if (!bot.content) {
+      const i = messages.value.indexOf(bot)
+      if (i >= 0) messages.value.splice(i, 1)
+    }
     messages.value.push({
       role: 'error',
-      content: describeError(err),
+      content: err?.message || describeError(err),
       at: new Date()
     })
 
     // 503 多半是選了一個沒啟動的模式——順手更新可用性，
     // 讓選單立刻反映現況，而不是等使用者再失敗一次
-    if (err?.response?.status === 503) await loadCacheModes()
+    if (err?.status === 503) await loadCacheModes()
   } finally {
+    bot.streaming = false
     sending.value = false
     await scrollDown()
   }
@@ -505,7 +606,7 @@ onUnmounted(stopPolling)
             「公司重整時，董事拒絕移交帳冊文件，會被處以多少罰金？」
           </p>
 
-          <div v-for="(m, i) in messages" :key="i" :class="['turn', m.role]">
+          <div v-for="(m, i) in messages" :key="i" :class="['turn', m.role, { streaming: m.streaming }]">
             <div class="bubble">
               <p class="text">{{ m.content }}</p>
 
@@ -610,7 +711,7 @@ onUnmounted(stopPolling)
             placeholder="輸入法律問題…"
           />
           <button @click="send" :disabled="!draft.trim() || sending">
-            {{ sending ? '查詢中…' : '送出' }}
+            {{ sending ? '生成中…' : '送出' }}
           </button>
         </div>
       </div>
@@ -892,6 +993,14 @@ body {
 .turn.error .bubble { border-color: var(--bad); }
 .text { white-space: pre-wrap; word-break: break-word; }
 .time { color: var(--dim); font-size: 0.72rem; margin-top: 4px; }
+
+/* 串流生成中的游標，done 事件後隨 streaming 標記消失 */
+.turn.streaming .text::after {
+  content: '▍';
+  margin-left: 2px;
+  animation: blink 1s steps(2, start) infinite;
+}
+@keyframes blink { to { visibility: hidden; } }
 
 .disclaimer {
   color: var(--dim); font-size: 0.76rem; text-align: center;

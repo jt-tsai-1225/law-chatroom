@@ -49,11 +49,17 @@ public interface ILLMService
     /// 指定的模式沒有設定端點時會拋 <see cref="CacheModeUnavailableException"/>，
     /// 不會靜默退回預設——否則使用者以為在比較兩種快取，實際打的是同一個引擎。
     /// </param>
+    /// <param name="onTokenDelta">
+    /// 每收到一段生成文字就呼叫一次，用於把內容即時轉發給前端。
+    /// 省略時行為完全不變（組好完整字串再一次回傳）。
+    /// 回呼在讀取迴圈內被 await，因此瀏覽器斷線時會以例外中斷生成讀取。
+    /// </param>
     Task<LLMCompletionResult> GenerateFromTokensAsync(
         IReadOnlyList<int> promptTokens,
         CancellationToken cancellationToken = default,
         int? maxTokens = null,
-        string? cacheMode = null);
+        string? cacheMode = null,
+        Func<string, Task>? onTokenDelta = null);
 }
 
 /// <summary>指定的快取模式沒有可用的端點。對應 HTTP 503。</summary>
@@ -109,7 +115,8 @@ public class LLMService : ILLMService
         IReadOnlyList<int> promptTokens,
         CancellationToken cancellationToken = default,
         int? maxTokens = null,
-        string? cacheMode = null)
+        string? cacheMode = null,
+        Func<string, Task>? onTokenDelta = null)
     {
         var totalStopwatch = System.Diagnostics.Stopwatch.StartNew();
         var result = new LLMCompletionResult();
@@ -265,6 +272,11 @@ public class LLMService : ILLMService
                 ttft ??= requestStopwatch.ElapsedMilliseconds;
                 builder.Append(text);
                 generatedTokens++;
+
+                if (onTokenDelta is not null)
+                {
+                    await onTokenDelta(text);
+                }
             }
         }
 

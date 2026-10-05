@@ -1,6 +1,7 @@
 using ChatBot.Api.Models;
 using ChatBot.Api.Services;
 using Microsoft.AspNetCore.Mvc;
+using System.Text.Json;
 
 namespace ChatBot.Api.Controllers;
 
@@ -8,6 +9,10 @@ namespace ChatBot.Api.Controllers;
 [Route("api/[controller]")]
 public class ChatController : ControllerBase
 {
+    // SSE 的 delta/done 事件內容用 Web 預設序列化（camelCase），
+    // 與既有 /api/chat 回應的欄位命名一致，前端可以共用同一組欄位名。
+    private static readonly JsonSerializerOptions JsonOpts = new(JsonSerializerDefaults.Web);
+
     private readonly IChatBotService _chatBotService;
     private readonly ILogger<ChatController> _logger;
     private readonly ILMCacheService? _cacheService;
@@ -47,6 +52,119 @@ public class ChatController : ControllerBase
         {
             _logger.LogError(ex, "Error processing chat request");
             return StatusCode(500, new { error = "An error occurred while processing your request" });
+        }
+    }
+
+    /// <summary>
+    /// 聊天的串流版本。以 SSE（text/event-stream）把生成中的文字逐段送給前端，
+    /// 讓使用者不必等整段答案生成完才看到第一個字。
+    ///
+    /// 事件格式：
+    ///   event: delta  data: {"text":"…"}   一段生成中的文字（可多筆）
+    ///   event: done   data: {…ChatResponse} 生成結束，欄位與 /api/chat 相同
+    ///   event: error  data: {"error":"…"}  生成中斷（此時已無法改 HTTP 狀態碼）
+    ///
+    /// 失敗若發生在第一個 delta 之前（選了未啟動的模式、連不上引擎、
+    /// 查無條文前的檢索錯誤），仍以 HTTP 狀態碼回報（503/500/400），
+    /// 與 /api/chat 相同語意，前端能用同一套錯誤處理。
+    /// </summary>
+    [HttpPost("stream")]
+    [Produces("text/event-stream")]
+    public async Task ChatStream([FromBody] ChatRequest request, CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(request.Message))
+        {
+            Response.StatusCode = StatusCodes.Status400BadRequest;
+            await Response.WriteAsJsonAsync(new { error = "Message cannot be empty" }, cancellationToken);
+            return;
+        }
+
+        // SSE 標頭必須在第一次寫入前定案。
+        // X-Accel-Buffering 是給 nginx 看的：有這個標頭，nginx 會對這一個
+        // 回應關閉 proxy_buffering，逐段轉發而不攢批（nginx.conf 的
+        // /api/chat/stream location 也設了 proxy_buffering off，兩邊是雙保險）。
+        Response.StatusCode = StatusCodes.Status200OK;
+        Response.ContentType = "text/event-stream; charset=utf-8";
+        Response.Headers.CacheControl = "no-store";
+        Response.Headers.Append("X-Accel-Buffering", "no");
+
+        async Task WriteEventAsync(string eventName, string payload)
+        {
+            await Response.WriteAsync($"event: {eventName}\ndata: {payload}\n\n", cancellationToken);
+            await Response.Body.FlushAsync(cancellationToken);
+        }
+
+        // 注意 TaskCanceledException：HttpClient 逾時也會丟它（它是
+        // OperationCanceledException 的子類），但那與瀏覽器斷線不同——
+        // 瀏覽器斷線以「請求已取消」過濾後安靜結束，逾時要走下面的失敗流程。
+        ChatResponse? final = null;
+        Exception? failure = null;
+        try
+        {
+            final = await _chatBotService.GetReplyAsync(request, cancellationToken, async delta =>
+            {
+                await WriteEventAsync("delta", JsonSerializer.Serialize(new { text = delta }, JsonOpts));
+            });
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            // 瀏覽器切換聊天室或關閉頁面會中斷連線，不是伺服器錯誤，安靜結束。
+            return;
+        }
+        catch (Exception ex)
+        {
+            failure = ex;
+        }
+
+        if (failure is not null)
+        {
+            if (!Response.HasStarted)
+            {
+                // 一個字都還沒送出去，還可以用 HTTP 狀態碼表達失敗，
+                // 前端沿用 /api/chat 的錯誤處理（503 = 模式未啟動）。
+                if (failure is CacheModeUnavailableException unavailable)
+                {
+                    _logger.LogWarning("快取模式 {Mode} 不可用：{Message}", unavailable.Mode, failure.Message);
+                    Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
+                    await Response.WriteAsJsonAsync(
+                        new { error = failure.Message, mode = unavailable.Mode }, cancellationToken);
+                }
+                else
+                {
+                    _logger.LogError(failure, "Error processing streaming chat request");
+                    Response.StatusCode = StatusCodes.Status500InternalServerError;
+                    await Response.WriteAsJsonAsync(
+                        new { error = "An error occurred while processing your request" }, cancellationToken);
+                }
+
+                return;
+            }
+
+            // 內容已送出一部分，SSE 開始後不能改狀態碼，改以 error 事件告知。
+            // 寫入本身失敗（瀏覽器已斷線）就無能為力，安靜結束即可。
+            try
+            {
+                var message = failure is CacheModeUnavailableException modeEx
+                    ? modeEx.Message
+                    : "生成中斷，已顯示的內容可能不完整";
+                await WriteEventAsync("error", JsonSerializer.Serialize(new { error = message }, JsonOpts));
+            }
+            catch (OperationCanceledException)
+            {
+            }
+
+            return;
+        }
+
+        // done 事件帶整包 ChatResponse（含 TTFT、命中率、persisted 等量測欄位），
+        // 與 /api/chat 的回應同構，前端在這一刻把統計區一次補齊。
+        // 最後一筆寫入也可能碰上瀏覽器斷線，同樣安靜結束。
+        try
+        {
+            await WriteEventAsync("done", JsonSerializer.Serialize(final, JsonOpts));
+        }
+        catch (OperationCanceledException)
+        {
         }
     }
 

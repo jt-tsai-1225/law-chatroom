@@ -6,7 +6,14 @@ namespace ChatBot.Api.Services;
 
 public interface IChatBotService
 {
-    Task<ChatResponse> GetReplyAsync(ChatRequest request, CancellationToken cancellationToken = default);
+    /// <summary>
+    /// onTokenDelta：模型每生成一段文字就回呼一次（串流給前端用）。
+    /// 省略時行為與以前相同——組好完整回應再一次回傳。
+    /// </summary>
+    Task<ChatResponse> GetReplyAsync(
+        ChatRequest request,
+        CancellationToken cancellationToken = default,
+        Func<string, Task>? onTokenDelta = null);
 }
 
 /// <summary>
@@ -58,7 +65,9 @@ public class ChatBotService : IChatBotService
     }
 
     public async Task<ChatResponse> GetReplyAsync(
-        ChatRequest request, CancellationToken cancellationToken = default)
+        ChatRequest request,
+        CancellationToken cancellationToken = default,
+        Func<string, Task>? onTokenDelta = null)
     {
         var totalStopwatch = System.Diagnostics.Stopwatch.StartNew();
 
@@ -152,7 +161,7 @@ public class ChatBotService : IChatBotService
         // 注意：上面已經有一個 mode 是片段排列模式，兩者不同，別混用
         var cacheMode = CacheModes.Normalize(request.CacheMode);
         var llmResult = await _llmService.GenerateFromTokensAsync(
-            prompt.Tokens, cancellationToken, cacheMode: cacheMode);
+            prompt.Tokens, cancellationToken, cacheMode: cacheMode, onTokenDelta: onTokenDelta);
 
         // 純前綴快取在本次請求能命中的上限。缺少這個對照，
         // 「命中率 99.98%」無法區分究竟是 blend 生效還是單純的前綴複用。
