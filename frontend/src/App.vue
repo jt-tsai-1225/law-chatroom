@@ -1,5 +1,5 @@
 <script setup>
-import { ref, nextTick, onMounted, computed, onUnmounted } from 'vue'
+import { ref, nextTick, onMounted, computed, onUnmounted, reactive } from 'vue'
 import axios from 'axios'
 
 const API = import.meta.env.VITE_API_URL || '/api'
@@ -298,7 +298,13 @@ async function send() {
   // 量測資料（TTFT、命中率…）在 done 事件才補上，之前統計區不顯示。
   // 內容用模型原始輸出——資料庫存的也是這一份，用 reply 的話同一則訊息
   // 在「剛送出」與「重新載入後」會長得不一樣。
-  const bot = { role: 'bot', content: '', at: new Date(), streaming: true, stats: null }
+  //
+  // ⚠ 必須用 reactive() 包起來：push 進 ref 陣列之後，模板綁定的是
+  // Vue 的代理物件，而這個變數仍指向原始物件——直接對它 += 的話
+  // 改動不會被追蹤，文字會在 sending 轉 false 時才一次全部出現
+  // （正是「串流失效」的那種症狀）。reactive 代理 push 進陣列後
+  // Vue 會沿用同一個代理，之後的修改才會即時重繪。
+  const bot = reactive({ role: 'bot', content: '', at: new Date(), streaming: true, stats: null })
   messages.value.push(bot)
 
   try {
