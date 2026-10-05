@@ -154,6 +154,15 @@ services:
       - "8001:8000"
     ipc: host
 
+    # ⚠ 兩個 vLLM 實例不可同時啟動。
+    #   vLLM 以「載入前後的 GPU 記憶體差」估算自己用了多少，同一張卡上
+    #   另一個實例同時在配置記憶體，會被算成自己的用量，結果是 KV 池被
+    #   扣成零，啟動失敗：「No available memory for the cache blocks」。
+    #   等 CacheBlend 實例就緒（healthy）後這一個才開始載入，兩者就不會互相干擾。
+    depends_on:
+      vllm:
+        condition: service_healthy
+
     deploy:
       resources:
         reservations:
