@@ -1,0 +1,99 @@
+{{- /*
+  SeaweedFS 的 S3 身分設定含密鑰，所以放在 Secret 而不是 ConfigMap。
+  使用 secrets.existingSecret 時，那個 Secret 要另外有一個 s3.json 鍵（內容格式見下），
+  本 chart 就不再產生。
+*/ -}}
+{{- if not .Values.secrets.existingSecret }}
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ include "law-app.fullname" (dict "root" . "component" "seaweedfs-s3") }}
+  labels:
+    {{- include "law-app.labels" . | nindent 4 }}
+type: Opaque
+stringData:
+  s3.json: |
+    {
+      "identities": [{
+        "name": "law-app",
+        "credentials": [{ "accessKey": {{ .Values.seaweedfs.accessKey | quote }}, "secretKey": {{ required "請提供 secrets.s3SecretKey" .Values.secrets.s3SecretKey | quote }} }],
+        "actions": ["Read", "Write", "List", "Tagging", "Admin"]
+      }]
+    }
+---
+{{- end }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "law-app.fullname" (dict "root" . "component" "seaweedfs") }}
+  labels:
+    {{- include "law-app.labels" . | nindent 4 }}
+spec:
+  ports:
+    - { name: s3, port: 8333, targetPort: s3 }
+  selector:
+    {{- include "law-app.selector" (dict "root" . "component" "seaweedfs") | nindent 4 }}
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "law-app.fullname" (dict "root" . "component" "seaweedfs") }}
+  labels:
+    {{- include "law-app.labels" . | nindent 4 }}
+spec:
+  serviceName: {{ include "law-app.fullname" (dict "root" . "component" "seaweedfs") }}
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "law-app.selector" (dict "root" . "component" "seaweedfs") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "law-app.selector" (dict "root" . "component" "seaweedfs") | nindent 8 }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: seaweedfs
+          image: {{ include "law-app.image" .Values.images.seaweedfs }}
+          imagePullPolicy: {{ .Values.images.pullPolicy }}
+          args:
+            - server
+            - -dir=/data
+            - -master.volumeSizeLimitMB=1024
+            - -filer
+            - -s3
+            - -s3.config=/conf/s3.json
+          ports:
+            - { name: s3, containerPort: 8333 }
+          resources:
+            {{- toYaml .Values.seaweedfs.resources | nindent 12 }}
+          volumeMounts:
+            - { name: data, mountPath: /data }
+            - { name: s3conf, mountPath: /conf, readOnly: true }
+          readinessProbe:
+            tcpSocket: { port: s3 }
+            periodSeconds: 10
+      volumes:
+        - name: s3conf
+          secret:
+            {{- if .Values.secrets.existingSecret }}
+            secretName: {{ .Values.secrets.existingSecret }}
+            {{- else }}
+            secretName: {{ include "law-app.fullname" (dict "root" . "component" "seaweedfs-s3") }}
+            {{- end }}
+            items:
+              - { key: s3.json, path: s3.json }
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: [ReadWriteOnce]
+        {{- with .Values.seaweedfs.persistence.storageClass }}
+        storageClassName: {{ . | quote }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.seaweedfs.persistence.size }}

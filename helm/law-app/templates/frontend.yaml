@@ -1,0 +1,84 @@
+{{- $name := include "law-app.fullname" (dict "root" . "component" "frontend") }}
+{{- $backend := include "law-app.fullname" (dict "root" . "component" "backend") }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "law-app.labels" . | nindent 4 }}
+spec:
+  ports:
+    - { name: http, port: 80, targetPort: http }
+  selector:
+    {{- include "law-app.selector" (dict "root" . "component" "frontend") | nindent 4 }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "law-app.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.frontend.replicas }}
+  selector:
+    matchLabels:
+      {{- include "law-app.selector" (dict "root" . "component" "frontend") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "law-app.selector" (dict "root" . "component" "frontend") | nindent 8 }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: nginx
+          image: {{ include "law-app.image" .Values.images.frontend }}
+          imagePullPolicy: {{ .Values.images.pullPolicy }}
+          ports:
+            - { name: http, containerPort: 80 }
+          env:
+            # nginx 範本的兩個變數（見 frontend/nginx.conf）。
+            # 後端位址用本 release 的 Service 名稱；DNS 解析器由映像依 resolv.conf 自動偵測。
+            - { name: BACKEND_URL, value: "http://{{ $backend }}:8000" }
+            - { name: NGINX_ENTRYPOINT_LOCAL_RESOLVERS, value: "1" }
+          resources:
+            {{- toYaml .Values.frontend.resources | nindent 12 }}
+          readinessProbe:
+            httpGet: { path: /health, port: http }
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /health, port: http }
+            periodSeconds: 30
+{{- if .Values.frontend.ingress.enabled }}
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "law-app.labels" . | nindent 4 }}
+  {{- with .Values.frontend.ingress.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- with .Values.frontend.ingress.className }}
+  ingressClassName: {{ . }}
+  {{- end }}
+  {{- with .Values.frontend.ingress.tls }}
+  tls:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  rules:
+    - host: {{ required "frontend.ingress.host 必填（HCI 回覆後填入）" .Values.frontend.ingress.host | quote }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ $name }}
+                port: { number: 80 }
+{{- end }}

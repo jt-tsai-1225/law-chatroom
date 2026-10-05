@@ -1,0 +1,21 @@
+{{- range $name, $e := .Values.engines }}
+{{- if $e.enabled }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "law-model.engineName" (dict "root" $ "name" $name) }}
+  labels:
+    {{- include "law-model.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: {{ $name }}
+spec:
+  type: {{ $.Values.service.type }}
+  ports:
+    - name: http
+      port: {{ $.Values.service.port }}
+      targetPort: http
+  selector:
+    {{- include "law-model.selectorLabels" $ | nindent 4 }}
+    app.kubernetes.io/component: {{ $name }}
+{{- end }}
+{{- end }}

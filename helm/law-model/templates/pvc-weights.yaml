@@ -1,0 +1,49 @@
+{{- /*
+  模型權重的 PVC。已有現成的 PVC（existingClaim）就不建。
+  perEngine=true 時每個啟用的引擎各建一個，用於 ReadWriteOnce 且引擎可能被排到不同節點的情況。
+*/ -}}
+{{- if not .Values.model.weights.existingClaim }}
+{{- if .Values.model.weights.perEngine }}
+{{- range $name, $e := .Values.engines }}
+{{- if $e.enabled }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "law-model.engineWeightsClaim" (dict "root" $ "name" $name) }}
+  labels:
+    {{- include "law-model.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: {{ $name }}
+  annotations:
+    # 刪除 release 時保留權重：重灌 14 GB 很慢，而且叢集可能連不到 HuggingFace。
+    helm.sh/resource-policy: keep
+spec:
+  accessModes: [{{ $.Values.model.weights.accessMode }}]
+  {{- with $.Values.model.weights.storageClass }}
+  storageClassName: {{ . | quote }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ $.Values.model.weights.size }}
+{{- end }}
+{{- end }}
+{{- else }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "law-model.weightsClaim" . }}
+  labels:
+    {{- include "law-model.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/resource-policy: keep
+spec:
+  accessModes: [{{ .Values.model.weights.accessMode }}]
+  {{- with .Values.model.weights.storageClass }}
+  storageClassName: {{ . | quote }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.model.weights.size }}
+{{- end }}
+{{- end }}

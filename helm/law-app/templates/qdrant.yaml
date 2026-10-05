@@ -1,0 +1,63 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "law-app.fullname" (dict "root" . "component" "qdrant") }}
+  labels:
+    {{- include "law-app.labels" . | nindent 4 }}
+spec:
+  ports:
+    - { name: http, port: 6333, targetPort: http }
+    - { name: grpc, port: 6334, targetPort: grpc }
+  selector:
+    {{- include "law-app.selector" (dict "root" . "component" "qdrant") | nindent 4 }}
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "law-app.fullname" (dict "root" . "component" "qdrant") }}
+  labels:
+    {{- include "law-app.labels" . | nindent 4 }}
+spec:
+  serviceName: {{ include "law-app.fullname" (dict "root" . "component" "qdrant") }}
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "law-app.selector" (dict "root" . "component" "qdrant") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "law-app.selector" (dict "root" . "component" "qdrant") | nindent 8 }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: qdrant
+          image: {{ include "law-app.image" .Values.images.qdrant }}
+          imagePullPolicy: {{ .Values.images.pullPolicy }}
+          ports:
+            - { name: http, containerPort: 6333 }
+            - { name: grpc, containerPort: 6334 }
+          resources:
+            {{- toYaml .Values.qdrant.resources | nindent 12 }}
+          volumeMounts:
+            - { name: storage, mountPath: /qdrant/storage }
+          readinessProbe:
+            httpGet: { path: /readyz, port: http }
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /livez, port: http }
+            periodSeconds: 30
+            failureThreshold: 6
+  volumeClaimTemplates:
+    - metadata:
+        name: storage
+      spec:
+        accessModes: [ReadWriteOnce]
+        {{- with .Values.qdrant.persistence.storageClass }}
+        storageClassName: {{ . | quote }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.qdrant.persistence.size }}

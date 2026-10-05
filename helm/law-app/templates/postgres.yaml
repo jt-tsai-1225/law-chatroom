@@ -1,0 +1,78 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "law-app.fullname" (dict "root" . "component" "postgres") }}
+  labels:
+    {{- include "law-app.labels" . | nindent 4 }}
+spec:
+  clusterIP: None            # headless：StatefulSet 單一實例，不需要負載平衡
+  ports:
+    - { name: pg, port: 5432, targetPort: pg }
+  selector:
+    {{- include "law-app.selector" (dict "root" . "component" "postgres") | nindent 4 }}
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "law-app.fullname" (dict "root" . "component" "postgres") }}
+  labels:
+    {{- include "law-app.labels" . | nindent 4 }}
+spec:
+  serviceName: {{ include "law-app.fullname" (dict "root" . "component" "postgres") }}
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "law-app.selector" (dict "root" . "component" "postgres") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "law-app.selector" (dict "root" . "component" "postgres") | nindent 8 }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: postgres
+          image: {{ include "law-app.image" .Values.images.postgres }}
+          imagePullPolicy: {{ .Values.images.pullPolicy }}
+          ports:
+            - { name: pg, containerPort: 5432 }
+          env:
+            - { name: POSTGRES_DB, value: {{ .Values.postgres.database | quote }} }
+            - { name: POSTGRES_USER, value: {{ .Values.postgres.user | quote }} }
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "law-app.secretName" . }}
+                  key: POSTGRES_PASSWORD
+            # 初始化時用 scram-sha-256，不要 trust
+            - { name: POSTGRES_INITDB_ARGS, value: "--auth-host=scram-sha-256" }
+            # 資料放在掛載點的子目錄：PVC 的根目錄常有 lost+found，
+            # initdb 看到非空目錄會拒絕初始化。
+            - { name: PGDATA, value: /var/lib/postgresql/data/pgdata }
+          resources:
+            {{- toYaml .Values.postgres.resources | nindent 12 }}
+          volumeMounts:
+            - { name: data, mountPath: /var/lib/postgresql/data }
+          readinessProbe:
+            exec:
+              command: ["sh", "-c", "pg_isready -U $POSTGRES_USER -d $POSTGRES_DB"]
+            periodSeconds: 10
+            failureThreshold: 6
+          livenessProbe:
+            exec:
+              command: ["sh", "-c", "pg_isready -U $POSTGRES_USER -d $POSTGRES_DB"]
+            periodSeconds: 30
+            failureThreshold: 6
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: [ReadWriteOnce]
+        {{- with .Values.postgres.persistence.storageClass }}
+        storageClassName: {{ . | quote }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.postgres.persistence.size }}

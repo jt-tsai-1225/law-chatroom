@@ -1,0 +1,113 @@
+{{- $name := include "law-app.fullname" (dict "root" . "component" "backend") }}
+{{- $pg := include "law-app.fullname" (dict "root" . "component" "postgres") }}
+{{- $qd := include "law-app.fullname" (dict "root" . "component" "qdrant") }}
+{{- $sw := include "law-app.fullname" (dict "root" . "component" "seaweedfs") }}
+{{- if ne (int .Values.backend.replicas) 1 }}
+{{- fail "backend.replicas 必須是 1：預熱紀錄與回答快取在行程記憶體裡，多個副本會顯示互相矛盾的狀態。" }}
+{{- end }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "law-app.labels" . | nindent 4 }}
+spec:
+  ports:
+    - { name: http, port: 8000, targetPort: http }
+  selector:
+    {{- include "law-app.selector" (dict "root" . "component" "backend") | nindent 4 }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "law-app.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "law-app.selector" (dict "root" . "component" "backend") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "law-app.selector" (dict "root" . "component" "backend") | nindent 8 }}
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: backend
+          image: {{ include "law-app.image" .Values.images.backend }}
+          imagePullPolicy: {{ .Values.images.pullPolicy }}
+          ports:
+            - { name: http, containerPort: 8000 }
+          env:
+            - { name: ASPNETCORE_ENVIRONMENT, value: {{ .Values.backend.aspnetcoreEnvironment | quote }} }
+
+            # ── 密碼。必須排在引用它的變數之前：k8s 的 $(VAR) 只展開「已經定義過」的變數。
+            - name: POSTGRES_PASSWORD
+              valueFrom: { secretKeyRef: { name: {{ include "law-app.secretName" . }}, key: POSTGRES_PASSWORD } }
+            - name: S3_SECRET_KEY
+              valueFrom: { secretKeyRef: { name: {{ include "law-app.secretName" . }}, key: S3_SECRET_KEY } }
+            - name: RAGSettings__EmbeddingApiKey
+              valueFrom: { secretKeyRef: { name: {{ include "law-app.secretName" . }}, key: EMBEDDING_API_KEY } }
+            - name: RAGSettings__S3SecretKey
+              valueFrom: { secretKeyRef: { name: {{ include "law-app.secretName" . }}, key: S3_SECRET_KEY } }
+
+            # ── 聊天紀錄
+            - name: ConnectionStrings__Postgres
+              value: "Host={{ $pg }};Port=5432;Database={{ .Values.postgres.database }};Username={{ .Values.postgres.user }};Password=$(POSTGRES_PASSWORD)"
+
+            # ── 向量庫與物件儲存
+            - { name: RAGSettings__QdrantHost, value: {{ $qd | quote }} }
+            - { name: RAGSettings__ObjectStorageBackend, value: seaweedfs }
+            - { name: RAGSettings__S3ServiceUrl, value: "http://{{ $sw }}:8333" }
+            - { name: RAGSettings__S3Bucket, value: {{ .Values.seaweedfs.bucket | quote }} }
+            - { name: RAGSettings__S3AccessKey, value: {{ .Values.seaweedfs.accessKey | quote }} }
+            # 新版 AWS SDK 預設附加 CRC32 校驗和，部分 S3 相容實作會因此簽章失敗
+            - { name: AWS_REQUEST_CHECKSUM_CALCULATION, value: when_required }
+
+            # ── embedding
+            - { name: RAGSettings__EmbeddingEndpoint, value: {{ .Values.backend.embedding.endpoint | quote }} }
+            - { name: RAGSettings__EmbeddingModel, value: {{ .Values.backend.embedding.model | quote }} }
+            - { name: RAGSettings__EmbeddingDimensions, value: {{ .Values.backend.embedding.dimensions | quote }} }
+
+            # ── 推論引擎。cacheblend 同時是舊設定 LlmBaseUrl 的值（預熱與未指定模式時的預設）。
+            - { name: RAGSettings__LlmModel, value: {{ .Values.backend.llmModel | quote }} }
+            - { name: RAGSettings__LlmBaseUrl, value: {{ required "backend.llmEndpoints.cacheblend 必填" .Values.backend.llmEndpoints.cacheblend | quote }} }
+            - { name: RAGSettings__LlmEndpoints__cacheblend, value: {{ .Values.backend.llmEndpoints.cacheblend | quote }} }
+            # ⚠ 三個都要設，空字串也要設。映像內的 appsettings.json 預設值是 193 的位址，
+            #   不設的話空的那個會靜默退回它——「未設定」的模式就變成連到一個不存在的主機。
+            #   空字串會覆蓋預設值，後端據此回報「未設定端點」。
+            - { name: RAGSettings__LlmEndpoints__lmcache, value: {{ .Values.backend.llmEndpoints.lmcache | quote }} }
+            - { name: RAGSettings__LlmEndpoints__none, value: {{ .Values.backend.llmEndpoints.none | quote }} }
+            {{- with .Values.backend.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          resources:
+            {{- toYaml .Values.backend.resources | nindent 12 }}
+          volumeMounts:
+            # local 儲存後端的落地處。切到 seaweedfs 後不再寫入，保留掛載是為了能切回去。
+            # 用 emptyDir：資料以 SeaweedFS 為準，這裡的內容 Pod 重啟後消失無妨。
+            - { name: uploads, mountPath: /app/uploads }
+          # 這個端點只碰 Qdrant，不會送任何 prompt 給模型、不污染 KV 快取。
+          readinessProbe:
+            httpGet: { path: /api/knowledgebase/documents, port: http }
+            periodSeconds: 15
+            timeoutSeconds: 10
+            failureThreshold: 10
+          livenessProbe:
+            httpGet: { path: /api/knowledgebase/documents, port: http }
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 6
+      volumes:
+        - name: uploads
+          emptyDir: {}

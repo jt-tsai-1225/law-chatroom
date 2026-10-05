@@ -1,0 +1,18 @@
+推論引擎已部署：
+
+{{- range $name, $e := .Values.engines }}
+{{- if $e.enabled }}
+  {{ $name }}（{{ $e.displayName }}，{{ $e.mode }}）
+    http://{{ include "law-model.engineName" (dict "root" $ "name" $name) }}.{{ $.Release.Namespace }}.svc.cluster.local:{{ $.Values.service.port }}
+{{- end }}
+{{- end }}
+
+把上面的位址填進 law-app 的 backend.llmEndpoints（跨 workspace 要用完整的 .svc.cluster.local 名稱）。
+
+接下來：
+  1. 等引擎 Ready（模型載入一兩分鐘；第一次拉映像更久）：
+       kubectl -n {{ .Release.Namespace }} get pods -w
+  2. 引擎每次重啟後 L1 快取都是空的，要對 CacheBlend 引擎重新預熱：
+       POST /api/knowledgebase/warmup
+     純 LMCache 不需要也無法預熱，它的快取隨實際提問累積。
+  3. ⚠ 預熱完成之前不要把流量導過來，第一個使用者會承受冷啟成本。

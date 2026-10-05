@@ -1,0 +1,24 @@
+{{- if .Values.patches.enabled }}
+{{- $gw := .Files.Get "files/gpu_worker_v0240.py" }}
+{{- $lu := .Files.Get "files/lmc_models_utils_v0240.py" }}
+{{- if not $gw }}
+{{- fail "找不到 files/gpu_worker_v0240.py。沒有這個補丁 CacheBlend 會靜默失效——數據看起來正常但非前綴複用不會發生。請從 193 的 ~/blend-patches/ 複製進 helm/law-model/files/，或設 patches.enabled=false 明確表示不要 CacheBlend。" }}
+{{- end }}
+{{- if not $lu }}
+{{- fail "找不到 files/lmc_models_utils_v0240.py。理由同上。" }}
+{{- end }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "law-model.fullname" . }}-patches
+  labels:
+    {{- include "law-model.labels" . | nindent 4 }}
+data:
+  # 這兩個檔案會以 subPath 覆蓋映像內的同名檔案。
+  # ⚠ subPath 掛載的內容「不會」隨 ConfigMap 更新而變動，必須重建 Pod。
+  #   對我們沒差——補丁變更本來就要重啟引擎。
+  gpu_worker.py: |
+{{ $gw | indent 4 }}
+  lmcache_models_utils.py: |
+{{ $lu | indent 4 }}
+{{- end }}

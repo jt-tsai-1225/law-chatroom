@@ -1,0 +1,6 @@
+apiVersion: v2
+name: law-model
+description: 法律 RAG 聊天室的推論服務——可同時部署多個 vLLM 引擎（CacheBlend、純 LMCache、無快取），部署於 models workspace。
+type: application
+version: 0.2.0
+appVersion: "0.5.1"

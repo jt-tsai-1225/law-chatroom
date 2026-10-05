@@ -1,0 +1,6 @@
+apiVersion: v2
+name: law-app
+description: 法律 RAG 聊天室的應用層——前端、後端、聊天紀錄資料庫（PostgreSQL）、向量庫（Qdrant）、物件儲存（SeaweedFS）。部署於 ai-apps workspace。推論引擎在另一個 chart（law-model）。
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

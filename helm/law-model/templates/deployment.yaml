@@ -1,0 +1,228 @@
+{{- range $name, $e := .Values.engines }}
+{{- if $e.enabled }}
+
+{{- /* ── 驗證：寧可 helm 當場失敗，也不要部署出一個看起來正常卻不對的東西 ── */ -}}
+{{- if not (has $e.mode (list "blend" "prefix" "none")) }}
+{{- fail (printf "engines.%s.mode 必須是 blend / prefix / none，目前是 %q" $name $e.mode) }}
+{{- end }}
+{{- if and (eq $e.mode "blend") (not $.Values.patches.enabled) }}
+{{- fail (printf "engines.%s 是 blend 模式，但 patches.enabled=false。沒有補丁 CacheBlend 會靜默失效。" $name) }}
+{{- end }}
+{{- if $e.startAfter }}
+{{- $dep := get $.Values.engines $e.startAfter }}
+{{- if not $dep }}
+{{- fail (printf "engines.%s.startAfter=%q 不存在" $name $e.startAfter) }}
+{{- end }}
+{{- if not $dep.enabled }}
+{{- fail (printf "engines.%s.startAfter=%q，但那個引擎沒有啟用，這個引擎會永遠等不到。" $name $e.startAfter) }}
+{{- end }}
+{{- end }}
+{{- if ne $e.mode "none" }}
+{{- $l1 := int $e.lmcache.l1SizeGb }}
+{{- $mem := $e.resources.limits.memory | toString }}
+{{- if hasSuffix "Gi" $mem }}
+{{- if le (int (trimSuffix "Gi" $mem)) $l1 }}
+{{- fail (printf "engines.%s：limits.memory (%s) 必須大於 L1 快取 (%d GB)。L1 放在 CPU 記憶體裡，不留餘裕會被 OOMKilled。" $name $mem $l1) }}
+{{- end }}
+{{- end }}
+{{- end }}
+
+{{- $engineName := include "law-model.engineName" (dict "root" $ "name" $name) }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $engineName }}
+  labels:
+    {{- include "law-model.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: {{ $name }}
+spec:
+  # ⚠ 固定 1，不可調。LMCache 的 L2 索引存在行程記憶體裡，多個副本不會共用快取，
+  #   只會各自預熱、各自吃一份記憶體與 GPU。要提高吞吐請換更大的卡或做張量平行。
+  replicas: 1
+  # Recreate：GPU 一次只能給一個 Pod。RollingUpdate 會先起新的、新的拿不到卡而卡住。
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "law-model.selectorLabels" $ | nindent 6 }}
+      app.kubernetes.io/component: {{ $name }}
+  template:
+    metadata:
+      labels:
+        {{- include "law-model.selectorLabels" $ | nindent 8 }}
+        app.kubernetes.io/component: {{ $name }}
+      annotations:
+        {{- if $.Values.patches.enabled }}
+        # 補丁變更時重建 Pod（subPath 掛載不會隨 ConfigMap 更新）。
+        checksum/patches: {{ include (print $.Template.BasePath "/configmap-patches.yaml") $ | sha256sum }}
+        {{- end }}
+        {{- with $.Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      {{- with $.Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $.Values.scheduling.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $.Values.scheduling.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $.Values.scheduling.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      # 模型載入加預熱要幾分鐘；給足時間讓它正常結束，而不是被硬砍。
+      terminationGracePeriodSeconds: 60
+
+      {{- if $e.startAfter }}
+      initContainers:
+        # 等另一個引擎 Ready 才啟動。用同一個映像（一定有 python3），不需要額外映像。
+        # 為什麼需要：兩個引擎共用一張卡時，同時載入會互相搶記憶體而啟動失敗。
+        - name: wait-for-{{ $e.startAfter }}
+          image: "{{ $.Values.image.repository }}:{{ $.Values.image.tag }}"
+          imagePullPolicy: {{ $.Values.image.pullPolicy }}
+          command: ["python3", "-c"]
+          args:
+            - |
+              import sys, time, urllib.request
+              url = "http://{{ include "law-model.engineName" (dict "root" $ "name" $e.startAfter) }}:{{ $.Values.service.port }}/v1/models"
+              for _ in range(360):          # 最多等 30 分鐘
+                  try:
+                      urllib.request.urlopen(url, timeout=3)
+                      sys.exit(0)
+                  except Exception:
+                      time.sleep(5)
+              sys.exit(1)
+      {{- end }}
+
+      containers:
+        - name: vllm
+          image: "{{ $.Values.image.repository }}:{{ $.Values.image.tag }}"
+          imagePullPolicy: {{ $.Values.image.pullPolicy }}
+
+          # 必須是明確的陣列。每個元素原樣成為一個 argv，--kv-transfer-config 的 JSON 才不會被切開。
+          command: ["vllm"]
+          args:
+            - serve
+            - {{ $.Values.model.name | quote }}
+            {{- if ne $e.mode "none" }}
+            - --kv-transfer-config
+            - '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_both"}'
+            {{- end }}
+            - --tensor-parallel-size
+            - {{ $.Values.vllm.tensorParallelSize | quote }}
+            {{- if not $.Values.vllm.enablePrefixCaching }}
+            - --no-enable-prefix-caching
+            {{- end }}
+            - --enable-prompt-tokens-details
+            - --max-model-len
+            - {{ $.Values.vllm.maxModelLen | quote }}
+            - --max-num-batched-tokens
+            - {{ $.Values.vllm.maxNumBatchedTokens | quote }}
+            - --gpu-memory-utilization
+            - {{ $e.gpu.memoryUtilization | quote }}
+            {{- if $.Values.vllm.enforceEager }}
+            - --enforce-eager
+            {{- end }}
+            {{- range $.Values.vllm.extraArgs }}
+            - {{ . | quote }}
+            {{- end }}
+
+          env:
+            {{- if ne $e.mode "none" }}
+            # LMCache 以 Python 內建 hash() 算指紋，未固定種子則重啟後指紋不穩。
+            - { name: PYTHONHASHSEED, value: "0" }
+            - { name: VLLM_SERVER_DEV_MODE, value: "1" }
+            - { name: LMCACHE_LOCAL_CPU, value: "True" }
+            - { name: LMCACHE_MAX_LOCAL_CPU_SIZE, value: {{ $e.lmcache.l1SizeGb | quote }} }
+            - { name: LMCACHE_LOCAL_DISK, value: "file:///lmcache-l2/" }
+            - { name: LMCACHE_MAX_LOCAL_DISK_SIZE, value: {{ $e.lmcache.l2SizeGb | quote }} }
+            {{- end }}
+            {{- if eq $e.mode "blend" }}
+            # 啟用 blend：缺一則整個機制不會啟動。
+            - { name: BLEND_REGISTER_PATCH, value: "1" }
+            - { name: LMCACHE_ENABLE_BLENDING, value: "True" }
+            - { name: LMCACHE_BLEND_SPECIAL_STR, value: {{ $e.lmcache.blending.specialStr | quote }} }
+            - { name: LMCACHE_USE_LAYERWISE, value: "True" }
+            - { name: LMCACHE_BLEND_CHECK_LAYERS, value: {{ $e.lmcache.blending.checkLayers | quote }} }
+            - { name: LMCACHE_BLEND_RECOMPUTE_RATIOS, value: {{ $e.lmcache.blending.recomputeRatio | quote }} }
+            # 刻意不設 LMCACHE_CHUNK_SIZE：blend 模式下它不起作用。
+            {{- end }}
+            {{- if eq $e.mode "prefix" }}
+            # 完全不設 BLEND_* 與 BLEND_REGISTER_PATCH：是「不存在」而不是設成 0，
+            # 因為補丁可能只檢查變數有沒有出現。
+            - { name: LMCACHE_CHUNK_SIZE, value: {{ $e.lmcache.chunkSize | quote }} }
+            {{- end }}
+
+          ports:
+            - name: http
+              containerPort: 8000
+
+          resources:
+            requests:
+              {{- toYaml $e.resources.requests | nindent 14 }}
+              {{ $e.gpu.resourceName }}: {{ $e.gpu.count | quote }}
+            limits:
+              {{- toYaml $e.resources.limits | nindent 14 }}
+              {{ $e.gpu.resourceName }}: {{ $e.gpu.count | quote }}
+
+          volumeMounts:
+            - { name: weights, mountPath: /root/.cache/huggingface }
+            - { name: dshm, mountPath: /dev/shm }
+            {{- if ne $e.mode "none" }}
+            - { name: l2, mountPath: /lmcache-l2 }
+            {{- if $.Values.patches.enabled }}
+            - name: patches
+              mountPath: {{ $.Values.patches.gpuWorkerPath }}
+              subPath: gpu_worker.py
+              readOnly: true
+            - name: patches
+              mountPath: {{ $.Values.patches.lmcacheUtilsPath }}
+              subPath: lmcache_models_utils.py
+              readOnly: true
+            {{- end }}
+            {{- end }}
+
+          startupProbe:
+            httpGet: { path: /v1/models, port: http }
+            periodSeconds: {{ $.Values.probes.startup.periodSeconds }}
+            failureThreshold: {{ $.Values.probes.startup.failureThreshold }}
+          readinessProbe:
+            httpGet: { path: /v1/models, port: http }
+            periodSeconds: {{ $.Values.probes.readiness.periodSeconds }}
+            failureThreshold: {{ $.Values.probes.readiness.failureThreshold }}
+          livenessProbe:
+            httpGet: { path: /v1/models, port: http }
+            periodSeconds: {{ $.Values.probes.liveness.periodSeconds }}
+            failureThreshold: {{ $.Values.probes.liveness.failureThreshold }}
+            timeoutSeconds: {{ $.Values.probes.liveness.timeoutSeconds }}
+
+      volumes:
+        - name: weights
+          persistentVolumeClaim:
+            claimName: {{ include "law-model.engineWeightsClaim" (dict "root" $ "name" $name) }}
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: {{ $.Values.shm.sizeLimit }}
+        {{- if ne $e.mode "none" }}
+        - name: l2
+          emptyDir:
+            {{- with $e.l2.medium }}
+            medium: {{ . }}
+            {{- end }}
+            sizeLimit: {{ $e.l2.sizeLimit }}
+        {{- if $.Values.patches.enabled }}
+        - name: patches
+          configMap:
+            name: {{ include "law-model.fullname" $ }}-patches
+        {{- end }}
+        {{- end }}
+{{- end }}
+{{- end }}

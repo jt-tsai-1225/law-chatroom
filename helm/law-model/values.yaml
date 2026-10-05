@@ -1,0 +1,222 @@
+# law-model：vLLM 推論引擎，部署於 models workspace。
+#
+# 一個 release 可同時起多個「引擎」，對應聊天室介面上的三種快取模式：
+#
+#   cacheblend  CacheBlend，非前綴複用（blend）
+#   lmcache     純 LMCache，區塊前綴快取（prefix）
+#   nocache     不掛快取（none），預設不啟用
+#
+# 有幾項不是效能調校，而是「跑得起來 vs 崩潰」的差別，註解會標出來。
+# 改動之前請先讀那些註解。
+
+image:
+  # ⚠ 這個映像約 18.5 GB，比一般服務大一個量級。
+  #   推上 Harbor 要時間，叢集第一次拉取也要時間——startupProbe 的
+  #   failureThreshold 設得很寬就是為了這個。
+  repository: cr.phison.com/CHANGE_ME/vllm-openai
+  tag: v0.5.1
+  pullPolicy: IfNotPresent
+
+# imagePullSecrets：Harbor 專案設為 Public 時留空即可。
+imagePullSecrets: []
+
+model:
+  name: mistralai/Mistral-7B-Instruct-v0.2
+
+  # 權重約 14 GB。叢集若連不到 HuggingFace，PVC 要先灌好資料再部署：
+  #
+  #   kubectl -n <ns> apply -f <一個掛著這個 PVC 的暫時 Pod>
+  #   kubectl -n <ns> cp /mnt/nvme0/mistral-model/. <pod>:/root/.cache/huggingface/
+  #
+  # 灌完再 helm install。空的 PVC 會讓 vLLM 嘗試連外下載而卡住。
+  weights:
+    existingClaim: ""        # 已有 PVC 就填名稱，其餘欄位忽略
+    size: 20Gi
+    storageClass: ""         # 留空用叢集預設
+    # ReadWriteOnce 的 PVC 同一時間只能被同一個節點上的 Pod 掛載。
+    # 兩個引擎若被排到不同節點，第二個會卡在 ContainerCreating。
+    # 解法二選一：儲存支援 ReadWriteMany 就改成它；否則設 perEngine: true，
+    # 每個引擎各建一個 PVC（各灌一份權重，多占 14 GB）。
+    accessMode: ReadWriteOnce
+    perEngine: false
+
+# 所有引擎共用的排程設定，依叢集實際情況填。
+scheduling:
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+vllm:
+  maxModelLen: 32648
+  maxNumBatchedTokens: 32768
+  tensorParallelSize: 1
+
+  # ⚠ CacheBlend 不支援 CUDA Graph，必須 eager。
+  #   拿掉會讓 blend 失效或崩潰，不是「少一點最佳化」而已。
+  #   三個引擎都保持 eager，不讓「有沒有 CUDA Graph」混進快取模式的比較。
+  enforceEager: true
+
+  # vLLM 自己的前綴快取。LMCache 已經在做這件事，兩層疊起來會讓
+  # 量測與除錯都變得無法解釋。
+  enablePrefixCaching: false
+
+  extraArgs: []
+
+# vLLM 需要較大的共享記憶體（docker 下是 --ipc=host）。
+shm:
+  sizeLimit: 16Gi
+
+# 補丁檔。兩個檔案會覆蓋映像內既有的同名檔案（files/ 底下要有，見 files/README.md）。
+#
+# ⚠ 檔案不在 files/ 底下時 helm template 會直接失敗——這是故意的。
+#   靜默地少掛一個補丁會讓 CacheBlend 失效，而且數據看起來正常。
+patches:
+  enabled: true
+  # 映像內的套件路徑。換 vLLM 版本時要確認這兩個路徑沒變。
+  gpuWorkerPath: /opt/venv/lib/python3.12/site-packages/vllm/v1/worker/gpu_worker.py
+  lmcacheUtilsPath: /opt/venv/lib/python3.12/site-packages/lmcache/v1/compute/models/utils.py
+
+service:
+  type: ClusterIP
+  port: 8000
+
+# 探測。模型載入要一兩分鐘，第一次拉 18.5 GB 的映像更久。
+probes:
+  startup:
+    periodSeconds: 10
+    failureThreshold: 60      # 最多等 10 分鐘
+  readiness:
+    periodSeconds: 10
+    failureThreshold: 3
+  liveness:
+    # ⚠ 寬鬆是刻意的。存活探測失敗會讓 k8s 重建 Pod，而重建代價很高：
+    #   L1 快取消失、L2 索引不重建，要重跑預熱才會恢復。
+    #   寧可慢一點重啟，也不要因為一次高負載下的逾時就把快取清掉。
+    periodSeconds: 30
+    failureThreshold: 10
+    timeoutSeconds: 10
+
+podAnnotations: {}
+
+# ────────────────────────────────────────────────────────────────
+#  引擎
+#
+#  每個引擎是獨立的 Deployment 與 Service，replicas 固定為 1
+#  （LMCache 的 L2 索引存在行程記憶體裡，多個副本不會共用快取）。
+#  Service 名稱是 <chart 名稱>-<引擎鍵>，例如 law-model-cacheblend，
+#  後端的 LlmEndpoints 填這個名稱。
+# ────────────────────────────────────────────────────────────────
+engines:
+
+  cacheblend:
+    enabled: true
+    mode: blend
+    displayName: "CacheBlend（非前綴複用）"
+
+    # ⚠ GPU 怎麼分，是 HCI 還沒回答的問題。
+    #   每個引擎獨占一張卡：memoryUtilization 用 "0.9"（KV 池 210,092 tokens，約 46 個同時序列）。
+    #   兩個引擎共用一張 48 GB 的卡（時間切片）：兩邊各設 "0.45"，
+    #   而且 lmcache 的 startAfter 必須設成 cacheblend——
+    #   兩個引擎同時載入會互相搶記憶體，其中一個啟動失敗
+    #   （vLLM 以 GPU 記憶體的前後差估算自己的用量，另一個引擎的配置被算成自己的）。
+    gpu:
+      count: 1
+      resourceName: nvidia.com/gpu
+      memoryUtilization: "0.9"
+
+    # 等另一個引擎 Ready 後才啟動（以 initContainer 實現，不需要額外映像）。
+    startAfter: ""
+
+    lmcache:
+      # ── CacheBlend（非前綴複用）──────────────────────────────
+      blending:
+        specialStr: "# #"
+        checkLayers: 1
+        # 命中後重算多少比例的 token 以修正跨片段注意力。
+        # ⚠ 這個值同時決定效能與正確性：0.15 快但輸出會變動，
+        #   1.0 等同完整重算、正確但沒有加速。見驗證報告 14.6。
+        #   併發下這 15% 會吃 GPU 算力：併發 40 以上時 TTFT 輸給前綴快取（見併發實驗）。
+        recomputeRatio: "0.15"
+
+      # ── 容量 ──────────────────────────────────────────────────
+      # ⚠ 這兩個是安全性參數，不只是效能參數。
+      #   L1 滿了會觸發淘汰，而淘汰路徑有缺陷（LMCache issue #4133，上游未修），
+      #   結果是**整個引擎終止**，沒有優雅降級。
+      #
+      #   每 token 的 KV = 2 × 32 層 × 8 KV heads × 128 dim × 2 bytes = 128 KiB
+      #   實測（334 段）：相異 token 234,395 → 28.6 GiB，磁碟實佔 29G
+      #   50 GB 可容納 409,600 tokens ≈ 584 段（每段平均 702 tokens）
+      #
+      #   **新增法典前先算過再調大。**
+      l1SizeGb: 50
+      l2SizeGb: 50
+
+    # L2 用 emptyDir 而不是 PVC，這是刻意的：
+    #   in-process 模式下 LMCache 的 L2 索引存在記憶體裡，Pod 重啟後
+    #   **不會重建**。磁碟上的 KV 檔案雖然完整卻讀不到，等同冷啟。
+    #   所以保留 L2 的磁碟內容沒有任何價值，只會佔用一塊儲存。
+    #
+    # ⚠ emptyDir 吃的是節點的暫時儲存。節點要有足夠空間，
+    #   且最好是本機 SSD——走網路儲存的話 KV 載入會慢到讓快取失去意義。
+    l2:
+      sizeLimit: 60Gi
+      # 節點有 RAM disk 且記憶體足夠時可改 "Memory"，但那會從 Pod 的
+      # 記憶體額度扣除，與 l1SizeGb 相加後很容易超過 limits.memory。
+      medium: ""
+
+    # ⚠ L1 快取放在 CPU 記憶體裡，所以 limits.memory 必須大於 l1SizeGb，
+    #   並留出模型載入與推論的額外用量。50 GB 的 L1 → 至少 64 GB。
+    resources:
+      requests: { cpu: "8", memory: 64Gi }
+      limits:   { cpu: "16", memory: 64Gi }
+
+  lmcache:
+    enabled: true
+    mode: prefix
+    displayName: "純 LMCache（前綴快取）"
+
+    gpu:
+      count: 1
+      resourceName: nvidia.com/gpu
+      memoryUtilization: "0.9"
+
+    # 預設等 CacheBlend 引擎 Ready 後才啟動。兩個引擎各占一張卡時，
+    # 這只是讓第二個引擎晚幾分鐘起來，無害；共用一張卡時則是必要的。
+    startAfter: cacheblend
+
+    lmcache:
+      # 這個模式下 chunkSize 才真正起作用（blend 模式走另一條路徑，不使用它）。
+      chunkSize: 256
+      # 純前綴快取：只有「第一個區塊相同」的請求才會命中，
+      # 所以 L1 不必像 CacheBlend 那樣為全部 334 個片段留空間。
+      # 但仍要大於實際寫入量，否則一樣會觸發淘汰缺陷。
+      l1SizeGb: 35
+      l2SizeGb: 35
+
+    l2:
+      sizeLimit: 45Gi
+      medium: ""
+
+    resources:
+      requests: { cpu: "8", memory: 48Gi }
+      limits:   { cpu: "16", memory: 48Gi }
+
+  # 「無快取」：預設不啟用。
+  # 需要時：helm upgrade --set engines.nocache.enabled=true --set engines.lmcache.enabled=false
+  # （一張卡放不下三個引擎；有足夠的卡時三個可同時啟用。）
+  nocache:
+    enabled: false
+    mode: none
+    displayName: "無快取"
+
+    gpu:
+      count: 1
+      resourceName: nvidia.com/gpu
+      memoryUtilization: "0.9"
+
+    startAfter: ""
+
+    # 沒有 LMCache，所以沒有 L1/L2。
+    resources:
+      requests: { cpu: "8", memory: 24Gi }
+      limits:   { cpu: "16", memory: 24Gi }

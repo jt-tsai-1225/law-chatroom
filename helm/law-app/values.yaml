@@ -1,0 +1,120 @@
+# law-app：應用層，部署於 ai-apps workspace。
+# 推論引擎（vLLM）在 law-model，部署於 models workspace。
+
+# 所有映像都要先推上 Harbor（見 hci-deployment-questions.md 第七節）。
+images:
+  backend:   { repository: cr.phison.com/CHANGE_ME/law-backend,  tag: "0.1.0" }
+  frontend:  { repository: cr.phison.com/CHANGE_ME/law-frontend, tag: "0.1.0" }
+  # ⚠ 第三方映像一律釘版本，不用 latest：Pod 重建時 latest 可能拉到不同版本，
+  #   而且事後無從追溯當時跑的是哪一版。
+  postgres:  { repository: cr.phison.com/CHANGE_ME/postgres,     tag: "16-alpine" }
+  qdrant:    { repository: cr.phison.com/CHANGE_ME/qdrant,       tag: "v1.19.1" }
+  seaweedfs: { repository: cr.phison.com/CHANGE_ME/seaweedfs,    tag: "4.48" }
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+
+# ── 機密 ───────────────────────────────────────────────────────────
+# 不要把真值寫進這個檔案或 git。兩種做法：
+#   (a) 事先建好 Secret，這裡填名稱（建議；之後可交給 Vault / 平台管理）
+#   (b) 部署時 --set 傳入，chart 會建 Secret：
+#         helm install ... \
+#           --set secrets.postgresPassword=$(openssl rand -hex 24) \
+#           --set secrets.embeddingApiKey=... \
+#           --set secrets.s3SecretKey=$(openssl rand -hex 24)
+#       （helm 會把 --set 的值記在 release 資訊裡，叢集管理員看得到。）
+#
+# 使用 (a) 時，Secret 要有這四個鍵：
+#   POSTGRES_PASSWORD   EMBEDDING_API_KEY   S3_SECRET_KEY
+#   s3.json             SeaweedFS 的 S3 身分設定（含上面那個 S3_SECRET_KEY），格式：
+#     {"identities":[{"name":"law-app","credentials":[{"accessKey":"lawchatroom","secretKey":"<S3_SECRET_KEY>"}],
+#       "actions":["Read","Write","List","Tagging","Admin"]}]}
+secrets:
+  existingSecret: ""
+  postgresPassword: ""
+  embeddingApiKey: ""
+  s3SecretKey: ""
+
+# ── 後端 ───────────────────────────────────────────────────────────
+backend:
+  # 固定 1：後端記憶體裡有「哪些片段已預熱」的紀錄（ChunkCacheTracker）
+  # 與回答快取，多個副本各有各的，顯示的預熱狀態會互相矛盾。
+  replicas: 1
+
+  # 快取模式 → 推論引擎位址。跨 workspace 要用完整名稱：
+  #   http://<引擎 Service>.<namespace>.svc.cluster.local:8000
+  # law-model 安裝後的 NOTES 會印出這幾個值。
+  #
+  # none 留空：沒有常駐的無快取引擎時，後端會據此回報「未設定端點」，
+  # 而不是靜默退回 CacheBlend 讓人以為在比較兩種快取。
+  llmEndpoints:
+    cacheblend: "http://law-model-cacheblend.models.svc.cluster.local:8000"
+    lmcache:    "http://law-model-lmcache.models.svc.cluster.local:8000"
+    none:       ""
+
+  llmModel: mistralai/Mistral-7B-Instruct-v0.2
+
+  # ⚠ 叢集必須連得到這個外部 embedding gateway，否則檢索完全失效。
+  embedding:
+    endpoint: https://ainexus.phison.com/api/external/v1/embeddings
+    model: Qwen/Qwen3-Embedding-0.6B
+    dimensions: 1024
+
+  # Development 會顯示詳細錯誤並啟用 Swagger（/docs）。對外正式上線前改 Production。
+  aspnetcoreEnvironment: Development
+
+  extraEnv: []
+  resources:
+    requests: { cpu: 500m, memory: 1Gi }
+    limits:   { cpu: "2",  memory: 2Gi }
+
+# ── 前端 ───────────────────────────────────────────────────────────
+frontend:
+  replicas: 1
+  resources:
+    requests: { cpu: 50m,  memory: 64Mi }
+    limits:   { cpu: 500m, memory: 256Mi }
+
+  ingress:
+    enabled: false
+    className: ""            # 依叢集的 Ingress controller 填
+    host: ""                 # 待 HCI 回覆
+    annotations: {}
+    tls: []
+    # 上傳法規 PDF 可達數十 MB：ingress 本身的 body 大小限制要放寬，
+    # 否則請求在前端的 nginx 之前就被擋下（413）。以 ingress-nginx 為例：
+    #   nginx.ingress.kubernetes.io/proxy-body-size: "100m"
+    #   nginx.ingress.kubernetes.io/proxy-read-timeout: "600"   # 預熱是同步端點
+
+# ── PostgreSQL（聊天紀錄）──────────────────────────────────────────
+postgres:
+  database: lawchat
+  user: lawchat
+  persistence:
+    size: 5Gi
+    storageClass: ""
+  resources:
+    requests: { cpu: 100m, memory: 256Mi }
+    limits:   { cpu: "1",  memory: 1Gi }
+
+# ── Qdrant（向量庫）────────────────────────────────────────────────
+qdrant:
+  persistence:
+    size: 10Gi
+    storageClass: ""
+  resources:
+    requests: { cpu: 200m, memory: 512Mi }
+    limits:   { cpu: "2",  memory: 2Gi }
+
+# ── SeaweedFS（原始 PDF）───────────────────────────────────────────
+seaweedfs:
+  accessKey: lawchatroom
+  bucket: law-documents
+  persistence:
+    size: 10Gi
+    storageClass: ""
+  resources:
+    requests: { cpu: 100m, memory: 256Mi }
+    limits:   { cpu: "1",  memory: 1Gi }
+
+podAnnotations: {}

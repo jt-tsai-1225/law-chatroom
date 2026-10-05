@@ -1,0 +1,16 @@
+law-app 已部署（{{ .Release.Namespace }}）。
+
+接下來：
+  1. 等所有 Pod Ready：  kubectl -n {{ .Release.Namespace }} get pods -w
+  2. 第一次部署要建 SeaweedFS 的 bucket（{{ .Values.seaweedfs.bucket }}）：
+       kubectl -n {{ .Release.Namespace }} exec -i sts/{{ include "law-app.fullname" (dict "root" . "component" "seaweedfs") }} -- weed shell <<'EOT'
+       s3.bucket.create -name {{ .Values.seaweedfs.bucket }}
+       s3.bucket.list
+       EOT
+  3. 知識庫是空的：Qdrant 在新的 PVC 上沒有資料。把法規重新上傳（前端「知識庫」頁），
+     或從 193 的 /home/oem/qdrant_storage 複製進 PVC。
+  4. 確認後端連得到推論引擎：
+       kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "law-app.fullname" (dict "root" . "component" "frontend") }} 8080:80
+       curl localhost:8080/api/cachemodes
+  5. 對 CacheBlend 引擎預熱（引擎每次重啟後都要重做）：
+       curl -X POST localhost:8080/api/knowledgebase/warmup -H 'Content-Type: application/json' -d '{}'
