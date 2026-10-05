@@ -7,8 +7,170 @@ const API = import.meta.env.VITE_API_URL || '/api'
 // ── 分頁 ────────────────────────────────────────────────────────
 const tab = ref('chat')
 
+/**
+ * 後端在 Development 模式會回傳詳細錯誤，優先顯示它。
+ * 只說「發生錯誤」等於把訊息丟掉，排查時得回去翻容器 log。
+ */
+function describeError(err) {
+  const d = err?.response?.data
+  if (typeof d === 'string' && d.trim()) return d
+  if (d?.error) return d.hint ? `${d.error}（${d.hint}）` : d.error
+  if (d?.title) return d.title
+  if (err?.message) return err.message
+  return '無法連線到後端'
+}
+
 // ══════════════════════════════════════════════════════════════
-//  聊天
+//  快取模式
+// ══════════════════════════════════════════════════════════════
+
+/**
+ * 三種模式各是一個獨立的 vLLM 實例——LMCache 的設定在引擎啟動時就固定了，
+ * 無法用單次請求的參數切換。
+ *
+ * 可用性是後端**探測**出來的，不是設定出來的：一張 48 GB 的卡放不下三個
+ * 實例（光權重就 43.5 GB），所以「無快取」平常是停的。這裡據實顯示，
+ * 不可用的選項直接停用——列出來讓人點了才失敗是更差的做法。
+ */
+const cacheModes = ref([])
+const cacheMode = ref('cacheblend')
+
+async function loadCacheModes() {
+  try {
+    const { data } = await axios.get(`${API}/cachemodes`)
+    cacheModes.value = data || []
+
+    // 目前選的模式若不可用，換到第一個可用的，免得送出才失敗
+    const current = cacheModes.value.find(m => m.mode === cacheMode.value)
+    if (!current?.reachable) {
+      const fallback = cacheModes.value.find(m => m.reachable)
+      if (fallback) cacheMode.value = fallback.mode
+    }
+  } catch {
+    // 端點不存在時退回單一模式，不讓整個介面壞掉
+    cacheModes.value = [
+      { mode: 'cacheblend', displayName: 'CacheBlend（非前綴複用）',
+        configured: true, reachable: true }
+    ]
+  }
+}
+
+function modeLabel(mode) {
+  return cacheModes.value.find(m => m.mode === mode)?.displayName || mode
+}
+
+// ══════════════════════════════════════════════════════════════
+//  聊天室
+// ══════════════════════════════════════════════════════════════
+
+const conversations = ref([])
+const activeId = ref(null)
+/** 後端沒設定資料庫時為 false：問答照常，只是不保存。 */
+const roomsEnabled = ref(true)
+const roomsNote = ref('')
+const renamingId = ref(null)
+const renameDraft = ref('')
+
+async function loadConversations() {
+  try {
+    const { data } = await axios.get(`${API}/conversations`)
+    conversations.value = data || []
+    roomsEnabled.value = true
+    roomsNote.value = ''
+  } catch (err) {
+    if (err?.response?.status === 503) {
+      roomsEnabled.value = false
+      roomsNote.value = err.response.data?.detail || '聊天室功能未啟用'
+    } else {
+      roomsNote.value = describeError(err)
+    }
+    conversations.value = []
+  }
+}
+
+async function newConversation() {
+  if (!roomsEnabled.value) return
+  try {
+    const { data } = await axios.post(`${API}/conversations`, {})
+    conversations.value.unshift(data)
+    await openConversation(data.id)
+  } catch (err) {
+    roomsNote.value = describeError(err)
+  }
+}
+
+async function openConversation(id) {
+  if (!roomsEnabled.value) return
+  activeId.value = id
+  messages.value = []
+
+  try {
+    const { data } = await axios.get(`${API}/conversations/${id}`)
+    messages.value = (data.messages || []).map(fromStored)
+    await scrollDown()
+  } catch (err) {
+    messages.value = [{ role: 'error', content: describeError(err), at: new Date() }]
+  }
+}
+
+async function deleteConversation(id) {
+  if (!confirm('刪除這個聊天室？底下的訊息會一併清除，無法復原。')) return
+  try {
+    await axios.delete(`${API}/conversations/${id}`)
+    conversations.value = conversations.value.filter(c => c.id !== id)
+    if (activeId.value === id) { activeId.value = null; messages.value = [] }
+  } catch (err) {
+    roomsNote.value = describeError(err)
+  }
+}
+
+function startRename(c) {
+  renamingId.value = c.id
+  renameDraft.value = c.title
+  nextTick(() => document.getElementById(`rename-${c.id}`)?.focus())
+}
+
+async function commitRename(c) {
+  const title = renameDraft.value.trim()
+  renamingId.value = null
+  if (!title || title === c.title) return
+
+  try {
+    await axios.patch(`${API}/conversations/${c.id}`, { title })
+    c.title = title
+  } catch (err) {
+    roomsNote.value = describeError(err)
+  }
+}
+
+/** 資料庫裡的一則訊息 → 畫面上的一則訊息。 */
+function fromStored(m) {
+  if (m.role !== 'assistant') {
+    return { role: 'user', content: m.content, at: m.createdAt }
+  }
+
+  return {
+    role: 'bot',
+    content: m.content,
+    at: m.createdAt,
+    stats: {
+      ttft: m.ttftMs,
+      total: m.totalMs,
+      promptTokens: m.promptTokens,
+      cachedTokens: m.cachedTokens,
+      hitRate: m.cacheHitRate,
+      articles: m.retrievedArticles || [],
+      order: m.chunkOrder,
+      permutation: [],
+      prefixCeiling: m.prefixCeilingTokens,
+      overPrefix: m.cachedOverPrefixCeiling,
+      cacheMode: m.cacheMode
+    }
+  }
+}
+
+// ══════════════════════════════════════════════════════════════
+//  問答
 // ══════════════════════════════════════════════════════════════
 
 const messages = ref([])
@@ -35,6 +197,13 @@ async function send() {
   const text = draft.value.trim()
   if (!text || sending.value) return
 
+  // 沒有聊天室就先開一個，不要讓使用者多按一次
+  if (roomsEnabled.value && !activeId.value) {
+    await newConversation()
+  }
+
+  const firstTurn = messages.value.length === 0
+
   messages.value.push({ role: 'user', content: text, at: new Date() })
   draft.value = ''
   sending.value = true
@@ -43,13 +212,18 @@ async function send() {
   try {
     const { data } = await axios.post(`${API}/chat`, {
       message: text,
-      chunkOrder: chunkOrder.value
+      chunkOrder: chunkOrder.value,
+      cacheMode: cacheMode.value,
+      conversationId: activeId.value
     })
 
     messages.value.push({
+      // rawReply 與資料庫存的是同一份；用 reply 的話同一則訊息在
+      // 「剛送出」與「重新載入後」會長得不一樣。
       role: 'bot',
-      content: data.reply,
+      content: data.rawReply || data.reply,
       at: new Date(),
+      persisted: data.persisted,
       stats: {
         ttft: data.ttftMilliseconds,
         total: data.totalMilliseconds,
@@ -62,32 +236,50 @@ async function send() {
         reordered: data.reorderedForCache,
         prefixCeiling: data.prefixOnlyCeilingTokens,
         overPrefix: data.cachedOverPrefixCeiling,
-        tokensPerSecond: data.tokensPerSecond
+        tokensPerSecond: data.tokensPerSecond,
+        cacheMode: data.cacheMode,
+        historyUsed: data.historyMessagesUsed
       }
     })
+
+    if (firstTurn) await autoTitle(text)
+    await refreshActiveSummary()
   } catch (err) {
     messages.value.push({
       role: 'error',
       content: describeError(err),
       at: new Date()
     })
+
+    // 503 多半是選了一個沒啟動的模式——順手更新可用性，
+    // 讓選單立刻反映現況，而不是等使用者再失敗一次
+    if (err?.response?.status === 503) await loadCacheModes()
   } finally {
     sending.value = false
     await scrollDown()
   }
 }
 
-/**
- * 後端在 Development 模式會回傳詳細錯誤，優先顯示它。
- * 只說「發生錯誤」等於把訊息丟掉，排查時得回去翻容器 log。
- */
-function describeError(err) {
-  const d = err?.response?.data
-  if (typeof d === 'string' && d.trim()) return d
-  if (d?.error) return d.hint ? `${d.error}（${d.hint}）` : d.error
-  if (d?.title) return d.title
-  if (err?.message) return err.message
-  return '無法連線到後端'
+/** 第一則訊息後把「新對話」換成問題的前 30 字，側欄才認得出是哪一個。 */
+async function autoTitle(firstMessage) {
+  const c = conversations.value.find(x => x.id === activeId.value)
+  if (!c || c.title !== '新對話') return
+
+  const title = firstMessage.length > 30
+    ? firstMessage.slice(0, 30) + '…'
+    : firstMessage
+
+  try {
+    await axios.patch(`${API}/conversations/${c.id}`, { title })
+    c.title = title
+  } catch { /* 命名失敗不影響對話，沉默即可 */ }
+}
+
+function refreshActiveSummary() {
+  const c = conversations.value.find(x => x.id === activeId.value)
+  if (!c) return
+  c.messageCount = messages.value.filter(m => m.role !== 'error').length
+  c.updatedAt = new Date().toISOString()
 }
 
 async function scrollDown() {
@@ -229,11 +421,17 @@ function fmtTime(d) {
   return new Date(d).toLocaleTimeString('zh-TW', { hour: '2-digit', minute: '2-digit' })
 }
 
+function fmtDate(d) {
+  return new Date(d).toLocaleDateString('zh-TW', { month: 'numeric', day: 'numeric' })
+}
+
 function fmtNum(n) {
   return typeof n === 'number' ? n.toLocaleString('zh-TW') : '—'
 }
 
-onMounted(() => { loadKnowledgeBase() })
+onMounted(async () => {
+  await Promise.all([loadKnowledgeBase(), loadCacheModes(), loadConversations()])
+})
 onUnmounted(stopPolling)
 </script>
 
@@ -251,87 +449,170 @@ onUnmounted(stopPolling)
     </header>
 
     <!-- ══════════════ 問答 ══════════════ -->
-    <section v-show="tab === 'chat'" class="panel">
-      <div class="thread" ref="scroller">
-        <p v-if="messages.length === 0" class="empty">
-          問一個民法或公司法的問題，例如：<br />
-          「公司重整時，董事拒絕移交帳冊文件，會被處以多少罰金？」
+    <section v-show="tab === 'chat'" class="chat-layout">
+
+      <!-- ── 側欄：聊天室 ── -->
+      <aside class="rooms">
+        <button class="new-room" @click="newConversation" :disabled="!roomsEnabled">
+          ＋ 新對話
+        </button>
+
+        <p v-if="!roomsEnabled" class="rooms-note">
+          {{ roomsNote }}<br />
+          <span class="dim">問答仍可使用，只是不會留下紀錄。</span>
         </p>
+        <p v-else-if="roomsNote" class="err small">{{ roomsNote }}</p>
 
-        <div v-for="(m, i) in messages" :key="i" :class="['turn', m.role]">
-          <div class="bubble">
-            <p class="text">{{ m.content }}</p>
+        <ul v-if="roomsEnabled" class="room-list">
+          <li
+            v-for="c in conversations"
+            :key="c.id"
+            :class="['room', { on: c.id === activeId }]"
+            @click="openConversation(c.id)"
+          >
+            <input
+              v-if="renamingId === c.id"
+              :id="`rename-${c.id}`"
+              v-model="renameDraft"
+              class="rename"
+              @keyup.enter="commitRename(c)"
+              @blur="commitRename(c)"
+              @click.stop
+            />
+            <template v-else>
+              <span class="room-title">{{ c.title }}</span>
+              <span class="room-meta">
+                {{ fmtDate(c.updatedAt) }} · {{ c.messageCount }} 則
+              </span>
+              <span class="room-acts">
+                <button title="重新命名" @click.stop="startRename(c)">✎</button>
+                <button title="刪除" @click.stop="deleteConversation(c.id)">✕</button>
+              </span>
+            </template>
+          </li>
+        </ul>
 
-            <div v-if="m.stats" class="stats">
-              <div class="row">
-                <span class="k">TTFT</span>
-                <span class="v strong">{{ fmtNum(m.stats.ttft) }} ms</span>
-                <span class="k">總耗時</span>
-                <span class="v">{{ fmtNum(m.stats.total) }} ms</span>
-                <span class="k">生成速率</span>
-                <span class="v">{{ m.stats.tokensPerSecond?.toFixed(1) }} tok/s</span>
-              </div>
+        <p v-if="roomsEnabled && conversations.length === 0" class="rooms-note">
+          還沒有任何對話。直接在右邊輸入問題就會自動建立一個。
+        </p>
+      </aside>
 
-              <div class="row">
-                <span class="k">KV 命中</span>
-                <span class="v strong">
-                  {{ fmtNum(m.stats.cachedTokens) }} / {{ fmtNum(m.stats.promptTokens) }}
-                  （{{ m.stats.hitRate?.toFixed(2) }}%）
-                </span>
-              </div>
+      <!-- ── 主區：對話 ── -->
+      <div class="panel">
+        <div class="thread" ref="scroller">
+          <p v-if="messages.length === 0" class="empty">
+            問一個民法或公司法的問題，例如：<br />
+            「公司重整時，董事拒絕移交帳冊文件，會被處以多少罰金？」
+          </p>
 
-              <!--
-                前綴上限是判讀命中率的必要對照：命中率再高，若沒有超過
-                「純前綴快取所能提供的上限」，就無法證明非前綴複用有在運作。
-              -->
-              <div class="row">
-                <span class="k">前綴快取上限</span>
-                <span class="v">{{ fmtNum(m.stats.prefixCeiling) }} tokens</span>
-                <span class="k">實際 ÷ 上限</span>
-                <span :class="['v', 'badge', m.stats.overPrefix > 1.05 ? 'good' : 'plain']">
-                  {{ m.stats.overPrefix }}×
-                </span>
-              </div>
-              <p v-if="m.stats.overPrefix > 1.05" class="note">
-                超出前綴快取所能解釋的範圍 → 非前綴複用（CacheBlend）確實生效
+          <div v-for="(m, i) in messages" :key="i" :class="['turn', m.role]">
+            <div class="bubble">
+              <p class="text">{{ m.content }}</p>
+
+              <p v-if="m.role === 'bot' && m.persisted === false" class="warn small">
+                ⚠ 這則回覆沒有存進資料庫，重新整理後會消失
               </p>
 
-              <div class="row wrap">
-                <span class="k">排列</span>
-                <span class="v">
-                  {{ m.stats.order }}
-                  <template v-if="m.stats.permutation.length">
-                    [{{ m.stats.permutation.join(',') }}]
-                  </template>
-                  <template v-if="m.stats.reordered">· 已依快取重排</template>
-                </span>
-              </div>
+              <div v-if="m.stats" class="stats">
+                <div class="row">
+                  <span v-if="m.stats.cacheMode" class="badge mode">
+                    {{ modeLabel(m.stats.cacheMode) }}
+                  </span>
+                  <span class="k">TTFT</span>
+                  <span class="v strong">{{ fmtNum(m.stats.ttft) }} ms</span>
+                  <span class="k">總耗時</span>
+                  <span class="v">{{ fmtNum(m.stats.total) }} ms</span>
+                  <span v-if="m.stats.tokensPerSecond" class="k">生成速率</span>
+                  <span v-if="m.stats.tokensPerSecond" class="v">
+                    {{ m.stats.tokensPerSecond.toFixed(1) }} tok/s
+                  </span>
+                </div>
 
-              <div class="row wrap">
-                <span class="k">引用片段</span>
-                <span class="v articles">
-                  <code v-for="(a, j) in m.stats.articles" :key="j">{{ a }}</code>
-                </span>
+                <div class="row">
+                  <span class="k">KV 命中</span>
+                  <span class="v strong">
+                    {{ fmtNum(m.stats.cachedTokens) }} / {{ fmtNum(m.stats.promptTokens) }}
+                    （{{ m.stats.hitRate?.toFixed(2) }}%）
+                  </span>
+                  <template v-if="m.stats.historyUsed">
+                    <span class="k">帶入歷史</span>
+                    <span class="v">{{ m.stats.historyUsed }} 則</span>
+                  </template>
+                </div>
+
+                <!--
+                  前綴上限是判讀命中率的必要對照：命中率再高，若沒有超過
+                  「純前綴快取所能提供的上限」，就無法證明非前綴複用有在運作。
+                -->
+                <div class="row">
+                  <span class="k">前綴快取上限</span>
+                  <span class="v">{{ fmtNum(m.stats.prefixCeiling) }} tokens</span>
+                  <span class="k">實際 ÷ 上限</span>
+                  <span :class="['v', 'badge', m.stats.overPrefix > 1.05 ? 'good' : 'plain']">
+                    {{ m.stats.overPrefix }}×
+                  </span>
+                </div>
+                <p v-if="m.stats.overPrefix > 1.05" class="note">
+                  超出前綴快取所能解釋的範圍 → 非前綴複用（CacheBlend）確實生效
+                </p>
+
+                <div class="row wrap">
+                  <span class="k">排列</span>
+                  <span class="v">
+                    {{ m.stats.order }}
+                    <template v-if="m.stats.permutation?.length">
+                      [{{ m.stats.permutation.join(',') }}]
+                    </template>
+                    <template v-if="m.stats.reordered">· 已依快取重排</template>
+                  </span>
+                </div>
+
+                <div class="row wrap">
+                  <span class="k">引用片段</span>
+                  <span class="v articles">
+                    <code v-for="(a, j) in m.stats.articles" :key="j">{{ a }}</code>
+                  </span>
+                </div>
               </div>
             </div>
+            <span class="time">{{ fmtTime(m.at) }}</span>
           </div>
-          <span class="time">{{ fmtTime(m.at) }}</span>
         </div>
-      </div>
 
-      <div class="composer">
-        <select v-model="chunkOrder" title="片段排列方式（驗證用）">
-          <option v-for="o in ORDER_MODES" :key="o.value" :value="o.value">{{ o.label }}</option>
-        </select>
-        <input
-          v-model="draft"
-          @keyup.enter="send"
-          :disabled="sending"
-          placeholder="輸入法律問題…"
-        />
-        <button @click="send" :disabled="!draft.trim() || sending">
-          {{ sending ? '查詢中…' : '送出' }}
-        </button>
+        <!--
+          免責聲明固定顯示一次，不再附在每一則回覆後面。
+          每則都重複一遍只會讓人略過不看，而且會被存進對話歷史送回模型。
+        -->
+        <p class="disclaimer">
+          ⚠️ 以上資訊僅供參考，不構成正式法律意見。具體法律問題請諮詢專業律師。
+        </p>
+
+        <div class="composer">
+          <select v-model="cacheMode" title="要打哪一個推論端點">
+            <option
+              v-for="m in cacheModes"
+              :key="m.mode"
+              :value="m.mode"
+              :disabled="!m.reachable"
+            >
+              {{ m.displayName }}{{ m.reachable ? '' : '（未啟動）' }}
+            </option>
+          </select>
+
+          <select v-model="chunkOrder" title="片段排列方式（驗證用）">
+            <option v-for="o in ORDER_MODES" :key="o.value" :value="o.value">{{ o.label }}</option>
+          </select>
+
+          <input
+            v-model="draft"
+            @keyup.enter="send"
+            :disabled="sending"
+            placeholder="輸入法律問題…"
+          />
+          <button @click="send" :disabled="!draft.trim() || sending">
+            {{ sending ? '查詢中…' : '送出' }}
+          </button>
+        </div>
       </div>
     </section>
 
@@ -468,6 +749,15 @@ onUnmounted(stopPolling)
           <strong>服務重啟後 L2 索引不會重建，需要重新預熱。</strong>
         </p>
 
+        <!--
+          預熱只會寫進「目前選到的」那個引擎。兩個引擎各有自己的快取，
+          不講明的話切換模式後第一題變慢會被當成 CacheBlend 沒生效。
+        -->
+        <p class="hint">
+          <strong>預熱只對目前選定的推論端點生效。</strong>
+          切換快取模式後，新的端點需要各自預熱一次。
+        </p>
+
         <div v-if="warming" class="state">預熱中，這可能需要一到兩分鐘…</div>
 
         <div v-if="warmupResult" class="kv">
@@ -518,7 +808,7 @@ body {
   line-height: 1.6;
 }
 
-.app { max-width: 1000px; margin: 0 auto; height: 100vh; display: flex; flex-direction: column; }
+.app { max-width: 1240px; margin: 0 auto; height: 100vh; display: flex; flex-direction: column; }
 
 .top {
   display: flex; align-items: center; justify-content: space-between;
@@ -538,6 +828,51 @@ body {
 .panel { flex: 1; display: flex; flex-direction: column; min-height: 0; }
 .panel.scroll { overflow-y: auto; padding: 20px; gap: 20px; }
 
+/* ── 聊天室側欄 ───────────────────────────────────── */
+.chat-layout { flex: 1; display: flex; min-height: 0; }
+
+.rooms {
+  width: 240px; flex-shrink: 0; border-right: 1px solid var(--line);
+  display: flex; flex-direction: column; padding: 12px; gap: 10px; overflow-y: auto;
+}
+
+.new-room {
+  background: var(--accent); border: 1px solid var(--accent); color: #fff;
+  padding: 8px; border-radius: 6px; cursor: pointer; font-size: 0.88rem;
+  font-family: inherit;
+}
+.new-room:disabled { opacity: 0.4; cursor: not-allowed; }
+
+.rooms-note { color: var(--dim); font-size: 0.78rem; line-height: 1.5; }
+.rooms-note .dim { color: #6d7389; }
+
+.room-list { list-style: none; display: flex; flex-direction: column; gap: 2px; }
+
+.room {
+  padding: 8px 10px; border-radius: 6px; cursor: pointer;
+  display: grid; grid-template-columns: 1fr auto; gap: 2px 6px; align-items: center;
+}
+.room:hover { background: var(--card); }
+.room.on { background: #1d2740; }
+
+.room-title {
+  font-size: 0.86rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.room-meta { grid-column: 1; color: var(--dim); font-size: 0.72rem; }
+.room-acts { grid-row: 1 / span 2; grid-column: 2; display: flex; gap: 2px; opacity: 0; }
+.room:hover .room-acts, .room.on .room-acts { opacity: 1; }
+.room-acts button {
+  background: none; border: none; color: var(--dim); cursor: pointer;
+  font-size: 0.8rem; padding: 2px 4px; border-radius: 4px;
+}
+.room-acts button:hover { color: var(--fg); background: var(--line); }
+
+.rename {
+  grid-column: 1 / -1; background: var(--bg); border: 1px solid var(--accent);
+  color: var(--fg); padding: 4px 6px; border-radius: 4px; font-size: 0.84rem;
+  font-family: inherit; width: 100%;
+}
+
 /* ── 問答 ─────────────────────────────────────────── */
 .thread { flex: 1; overflow-y: auto; padding: 20px; }
 .empty { color: var(--dim); text-align: center; margin-top: 60px; }
@@ -553,6 +888,11 @@ body {
 .text { white-space: pre-wrap; word-break: break-word; }
 .time { color: var(--dim); font-size: 0.72rem; margin-top: 4px; }
 
+.disclaimer {
+  color: var(--dim); font-size: 0.76rem; text-align: center;
+  padding: 6px 20px 0; border-top: 1px solid var(--line);
+}
+
 .stats {
   margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--line);
   font-size: 0.8rem;
@@ -566,8 +906,13 @@ body {
 .badge.good { background: rgba(63, 191, 127, 0.18); color: var(--good); }
 .badge.plain { background: var(--line); color: var(--dim); }
 .badge.partial { background: rgba(224, 168, 60, 0.18); color: var(--warn); }
+.badge.mode {
+  background: rgba(91, 140, 255, 0.18); color: var(--accent);
+  font-size: 0.74rem; margin-right: 4px;
+}
 .step.skipped { background: transparent; border: 1px dashed var(--line); color: var(--dim); }
 .note { color: var(--good); font-size: 0.76rem; margin: 2px 0 6px; }
+.small { font-size: 0.76rem; }
 .articles code {
   background: var(--line); padding: 1px 6px; border-radius: 4px;
   margin-right: 5px; font-size: 0.76rem;
@@ -585,6 +930,7 @@ body {
   cursor: pointer; background: var(--accent); border-color: var(--accent); color: #fff;
 }
 .composer button:disabled, .card button:disabled { opacity: 0.45; cursor: not-allowed; }
+.composer select option:disabled { color: var(--dim); }
 .card button { background: var(--card); color: var(--fg); border-color: var(--line); }
 .card button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
 

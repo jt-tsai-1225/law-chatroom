@@ -80,6 +80,7 @@ public class ChatBotService : IChatBotService
             var empty = new ChatResponse
             {
                 Reply = $"查無相關條文，無法回答這個問題。\n\n{Disclaimer}",
+                RawReply = "查無相關條文，無法回答這個問題。",
                 TotalMilliseconds = totalStopwatch.ElapsedMilliseconds,
                 ConversationId = request.ConversationId,
                 CacheMode = CacheModes.Normalize(request.CacheMode)
@@ -172,6 +173,7 @@ public class ChatBotService : IChatBotService
         var response = new ChatResponse
         {
             Reply = $"📜 **法律諮詢回覆：**\n\n{llmResult.Content}\n\n{Disclaimer}",
+            RawReply = llmResult.Content,
             TtftMilliseconds = llmResult.TtftMilliseconds,
             TotalMilliseconds = totalStopwatch.ElapsedMilliseconds,
             TokenCount = llmResult.TokenCount,

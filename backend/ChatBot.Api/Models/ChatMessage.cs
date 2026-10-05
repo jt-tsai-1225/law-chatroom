@@ -68,7 +68,18 @@ public class ChatRequest
 
 public class ChatResponse
 {
+    /// <summary>帶標題與免責聲明的完整回覆。既有的呼叫端仍讀這個欄位。</summary>
     public required string Reply { get; set; }
+
+    /// <summary>
+    /// 模型的原始輸出，不含「📜 法律諮詢回覆」標題與免責聲明。
+    ///
+    /// 存在的理由：資料庫存的是這一份，所以重新載入聊天室時看到的也是這一份。
+    /// 介面若顯示 Reply，同一則訊息在「剛送出」與「重新載入後」會長得不一樣。
+    /// 免責聲明改由介面固定顯示一次，不必每則訊息重複。
+    /// </summary>
+    public string RawReply { get; set; } = "";
+
     public DateTime Timestamp { get; set; } = DateTime.UtcNow;
     
     // TTFT Benchmark Metrics (optional, may be 0 if not measured)
