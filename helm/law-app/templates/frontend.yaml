@@ -46,8 +46,10 @@ spec:
             - { name: http, containerPort: 80 }
           env:
             # nginx 範本的兩個變數（見 frontend/nginx.conf）。
-            # 後端位址用本 release 的 Service 名稱；DNS 解析器由映像依 resolv.conf 自動偵測。
-            - { name: BACKEND_URL, value: "http://{{ $backend }}:8000" }
+            # 後端位址必須是完整網域名稱（FQDN）。nginx 的 resolver 不套用 resolv.conf 的
+            # search 清單，只寫 Service 短名稱會解析失敗（NXDOMAIN），所有 /api 請求回 502。
+            # docker compose 下 Docker 內建 DNS 認得短名稱，所以那邊不會遇到。
+            - { name: BACKEND_URL, value: "http://{{ $backend }}.{{ .Release.Namespace }}.svc.{{ .Values.clusterDomain }}:8000" }
             - { name: NGINX_ENTRYPOINT_LOCAL_RESOLVERS, value: "1" }
           resources:
             {{- toYaml .Values.frontend.resources | nindent 12 }}

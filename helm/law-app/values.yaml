@@ -18,6 +18,10 @@ images:
 
 imagePullSecrets: []
 
+# 叢集的 DNS 網域（Service 的完整名稱是 <名稱>.<namespace>.svc.<clusterDomain>）。
+# 絕大多數叢集是 cluster.local；不是的話前端的 nginx 會解析不到後端。
+clusterDomain: cluster.local
+
 # ── 機密 ───────────────────────────────────────────────────────────
 # 不要把真值寫進這個檔案或 git。兩種做法：
 #   (a) 事先建好 Secret，這裡填名稱（建議；之後可交給 Vault / 平台管理）
