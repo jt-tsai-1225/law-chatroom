@@ -3,17 +3,17 @@
 # law-model chart 在這個部署方式下不使用。
 
 # 所有映像都要先推上 Harbor（見 hci-deployment-questions.md 第七節）。
-# HCI Harbor：http://10.102.196.42:32180/，專案 w5tmtc（私有）。
+# HCI Harbor：http://10.102.196.43:32180/，專案 fjjlg5（私有）。
 # ⚠ 專案是私有的：叢集要拉得動，需要 imagePullSecrets（見下方），
 #   或請管理者把專案設為 Public。
 images:
-  backend:   { repository: 10.102.196.42:32180/w5tmtc/law-backend,  tag: "0.1.0" }
-  frontend:  { repository: 10.102.196.42:32180/w5tmtc/law-frontend, tag: "0.1.0" }
+  backend:   { repository: 10.102.196.43:32180/fjjlg5/law-backend,  tag: "0.1.0" }
+  frontend:  { repository: 10.102.196.43:32180/fjjlg5/law-frontend, tag: "0.1.0" }
   # ⚠ 第三方映像一律釘版本，不用 latest：Pod 重建時 latest 可能拉到不同版本，
   #   而且事後無從追溯當時跑的是哪一版。
-  postgres:  { repository: 10.102.196.42:32180/w5tmtc/postgres,     tag: "16-alpine" }
-  qdrant:    { repository: 10.102.196.42:32180/w5tmtc/qdrant,       tag: "v1.19.1" }
-  seaweedfs: { repository: 10.102.196.42:32180/w5tmtc/seaweedfs,    tag: "4.48" }
+  postgres:  { repository: 10.102.196.43:32180/fjjlg5/postgres,     tag: "16-alpine" }
+  qdrant:    { repository: 10.102.196.43:32180/fjjlg5/qdrant,       tag: "v1.19.1" }
+  seaweedfs: { repository: 10.102.196.43:32180/fjjlg5/seaweedfs,    tag: "4.48" }
   pullPolicy: IfNotPresent
 
 imagePullSecrets: []
