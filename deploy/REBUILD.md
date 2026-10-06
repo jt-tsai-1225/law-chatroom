@@ -60,9 +60,15 @@ POSTGRES_PASSWORD=
   `chrislusf/seaweedfs:4.47`（Docker Hub，`sha256:ce9e796f…bf882`）與 `:4.46`。
   **這些 digest 是本機存的映像，沒有對應到「哪個 Pod／容器實際在跑」的證據**——
   重灌前若能執行 `docker inspect law-qdrant law-seaweedfs --format '{{.Name}} {{.Image}}'` 比對映像 ID，才算確認。
-  `qdrant` 與 `seaweedfs` 的**程式版本號**沒有記錄（Helm 的 `values.yaml` 寫的 `v1.19.1` 與 `4.48` 是推測，
-  193 上沒有 4.48 這個標籤），要用 `docker exec law-qdrant ./qdrant --version`、
-  `docker exec law-seaweedfs weed version` 查證後再釘。
+  **程式版本號（2026/10/06 在運行中的容器內查得）：** Qdrant **1.19.1**（`qdrant --version`）、
+  SeaweedFS **4.48**（`weed version`，`530be3e37`）。兩者在 compose 裡都是 `latest`，所以
+  `latest` 在當時恰好就是這兩個版本。Helm `values.yaml` 的 `v1.19.1` 與 `4.48` 與此一致。
+  兩個容器實際使用的映像 ID：`law-qdrant` → `sha256:dd57172b…e740a92b`、
+  `law-seaweedfs` → `sha256:7b5ca1f1…4c52f5`。**映像 ID 不是上表的 repo digest**，
+  兩者不能直接比對；要對應請在重灌前執行
+  `docker images --no-trunc --format '{{.ID}} {{.Repository}}:{{.Tag}}' | grep -E 'dd57172b|7b5ca1f1'`。
+  要釘版本時用 `qdrant/qdrant:v1.19.1`、`chrislusf/seaweedfs:4.48`，
+  **這兩個標籤是否存在於 Docker Hub 沒有確認**，第一次拉取時留意；失敗就改用上表的 digest。
 
   **193 上沒有 `nginx` 與 `node` 的本機映像**，前端建置一定會連 Docker Hub。
   公司內部另有映像庫（193 上看到 `cr-ext.phison.com/phisonai/images/…`、
