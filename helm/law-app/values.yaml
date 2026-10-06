@@ -76,6 +76,12 @@ backend:
 # ── 前端 ───────────────────────────────────────────────────────────
 frontend:
   replicas: 1
+
+  # 對外入口。ClusterIP 只能在叢集內連；要從瀏覽器直接用「節點 IP:埠」連就設 NodePort。
+  # nodePort 留空由叢集自動配置（30000–32767），固定埠請填數字。
+  service:
+    type: NodePort
+    nodePort: null
   resources:
     requests: { cpu: 50m,  memory: 64Mi }
     limits:   { cpu: 500m, memory: 256Mi }

@@ -7,8 +7,14 @@ metadata:
   labels:
     {{- include "law-app.labels" . | nindent 4 }}
 spec:
+  type: {{ .Values.frontend.service.type }}
   ports:
-    - { name: http, port: 80, targetPort: http }
+    - name: http
+      port: 80
+      targetPort: http
+      {{- if and (eq .Values.frontend.service.type "NodePort") .Values.frontend.service.nodePort }}
+      nodePort: {{ .Values.frontend.service.nodePort }}
+      {{- end }}
   selector:
     {{- include "law-app.selector" (dict "root" . "component" "frontend") | nindent 4 }}
 ---
