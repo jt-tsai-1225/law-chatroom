@@ -1,0 +1,166 @@
+# vLLM 引擎專用 compose（獨立主機部署用）
+#
+# 用途：推論引擎放在 GPU 主機上，其餘服務（前端、後端、Qdrant、SeaweedFS、
+# postgres）部署在別處（例如 HCI），後端以 http://<本機 IP>:<埠> 呼叫引擎。
+# 與根目錄的 docker-compose.yml 的差別：
+#   * 只含三個引擎，不需要 POSTGRES_PASSWORD 等其他服務的設定
+#   * 不使用 lawnet 網路，三個埠直接發佈在主機上
+#   * 綁 GPU 3（本機指定給這個專案的那張）
+#   * 掛載加 security_opt label=disable（RHEL 的 SELinux 為 Enforcing；
+#     不用 :z，那會重新標記同事放在共用目錄的檔案）
+#
+# 用法（在 deploy/ 同層或任何位置皆可）：
+#   sudo docker compose -f deploy/compose.vllm.yml up -d
+#   sudo docker compose -f deploy/compose.vllm.yml ps
+#
+# 埠：8000 = CacheBlend，8001 = 純 LMCache，8002 = 無快取
+#
+# ⚠ 三個引擎是**依序**啟動的（depends_on + healthcheck）。vLLM 以載入前後的
+#   GPU 記憶體差估算自己的用量，同卡上另一個實例同時配置記憶體會被算成自己的，
+#   結果 KV 池變零而啟動失敗。每個引擎載入約 3.5 分鐘，全部就緒約 10 分鐘。
+#
+# ⚠ 三個實例的 gpu-memory-utilization 加總不可超過約 0.95。
+#   這張卡約 96 GB，預設各 0.30（約 29 GB）：權重約 14.5 GB，其餘為 KV 池。
+
+name: law-vllm
+
+x-engine-common: &engine-common
+  image: lmcache/vllm-openai:v0.5.1
+  restart: unless-stopped
+  ipc: host
+  security_opt:
+    - label=disable
+  deploy:
+    resources:
+      reservations:
+        devices:
+          - driver: nvidia
+            device_ids: ['3']
+            capabilities: [gpu]
+  healthcheck:
+    # 用 python 而非 curl：映像不保證有 curl，但一定有 python。
+    test: ["CMD", "python3", "-c",
+           "import urllib.request; urllib.request.urlopen('http://localhost:8000/v1/models')"]
+    interval: 15s
+    timeout: 5s
+    retries: 60
+    start_period: 60s
+
+services:
+
+  # CacheBlend（blending 開啟）
+  vllm:
+    <<: *engine-common
+    container_name: blend-vllm-024
+    ports:
+      - "8000:8000"
+    volumes:
+      - ${MODEL_DIR:-/mnt/nvme0/mistral-model}:/root/.cache/huggingface
+      - ${L2_DIR:-/mnt/nvme0/mistral-fs}:${L2_DIR:-/mnt/nvme0/mistral-fs}
+      # ⚠ 補丁來源不存在時 docker 會建一個空目錄蓋上去，補丁靜默失效。
+      #   啟動後務必檢查容器內檔案大小（見 deploy/REBUILD.md）。
+      - ${PATCH_DIR:-/home/oem/blend-patches}/gpu_worker_v0240.py:/opt/venv/lib/python3.12/site-packages/vllm/v1/worker/gpu_worker.py:ro
+      - ${PATCH_DIR:-/home/oem/blend-patches}/lmc_models_utils_v0240.py:/opt/venv/lib/python3.12/site-packages/lmcache/v1/compute/models/utils.py:ro
+    environment:
+      BLEND_REGISTER_PATCH: "1"
+      LMCACHE_ENABLE_BLENDING: "True"
+      LMCACHE_BLEND_SPECIAL_STR: "# #"
+      LMCACHE_USE_LAYERWISE: "True"
+      PYTHONHASHSEED: "0"
+      LMCACHE_BLEND_CHECK_LAYERS: "1"
+      LMCACHE_BLEND_RECOMPUTE_RATIOS: "0.15"
+      # 容量是安全性參數：L1 滿了淘汰會讓整個引擎終止（LMCache #4133）。
+      # 計算方式與依據見 docker-compose.yml 與 deploy/README.md。
+      LMCACHE_LOCAL_CPU: "True"
+      LMCACHE_MAX_LOCAL_CPU_SIZE: "${L1_SIZE_GB:-50}"
+      LMCACHE_LOCAL_DISK: "file://${L2_DIR:-/mnt/nvme0/mistral-fs}/"
+      LMCACHE_MAX_LOCAL_DISK_SIZE: "${L2_SIZE_GB:-50}"
+      VLLM_SERVER_DEV_MODE: "1"
+    # 必須用陣列形式，不可用折疊字串（單引號會被吃掉，JSON 失去保護）。
+    entrypoint: ["vllm"]
+    command:
+      - serve
+      - ${LLM_MODEL:-mistralai/Mistral-7B-Instruct-v0.2}
+      - --kv-transfer-config
+      - '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_both"}'
+      - --tensor-parallel-size
+      - "1"
+      - --no-enable-prefix-caching
+      - --enable-prompt-tokens-details
+      - --max-model-len
+      - "32648"
+      - --max-num-batched-tokens
+      - "32768"
+      - --gpu-memory-utilization
+      - "${GPU_UTIL_EACH:-0.30}"
+      - --enforce-eager
+
+  # 純 LMCache（前綴快取，不開 blending）
+  vllm-lmcache:
+    <<: *engine-common
+    container_name: lmcache-vllm
+    ports:
+      - "8001:8000"
+    depends_on:
+      vllm:
+        condition: service_healthy
+    volumes:
+      - ${MODEL_DIR:-/mnt/nvme0/mistral-model}:/root/.cache/huggingface
+      # L2 一定要與 CacheBlend 那個實例分開，兩個行程寫同一個目錄會壞檔。
+      - ${L2_LMCACHE_DIR:-/mnt/nvme0/mistral-fs-lmcache}:${L2_LMCACHE_DIR:-/mnt/nvme0/mistral-fs-lmcache}
+      - ${PATCH_DIR:-/home/oem/blend-patches}/gpu_worker_v0240.py:/opt/venv/lib/python3.12/site-packages/vllm/v1/worker/gpu_worker.py:ro
+      - ${PATCH_DIR:-/home/oem/blend-patches}/lmc_models_utils_v0240.py:/opt/venv/lib/python3.12/site-packages/lmcache/v1/compute/models/utils.py:ro
+    environment:
+      PYTHONHASHSEED: "0"
+      VLLM_SERVER_DEV_MODE: "1"
+      LMCACHE_CHUNK_SIZE: "256"
+      LMCACHE_LOCAL_CPU: "True"
+      LMCACHE_MAX_LOCAL_CPU_SIZE: "${L1_LMCACHE_SIZE_GB:-35}"
+      LMCACHE_LOCAL_DISK: "file://${L2_LMCACHE_DIR:-/mnt/nvme0/mistral-fs-lmcache}/"
+      LMCACHE_MAX_LOCAL_DISK_SIZE: "${L2_LMCACHE_SIZE_GB:-35}"
+    entrypoint: ["vllm"]
+    command:
+      - serve
+      - ${LLM_MODEL:-mistralai/Mistral-7B-Instruct-v0.2}
+      - --kv-transfer-config
+      - '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_both"}'
+      - --tensor-parallel-size
+      - "1"
+      - --no-enable-prefix-caching
+      - --enable-prompt-tokens-details
+      - --max-model-len
+      - "32648"
+      - --max-num-batched-tokens
+      - "32768"
+      - --gpu-memory-utilization
+      - "${GPU_UTIL_EACH:-0.30}"
+      - --enforce-eager
+
+  # 無快取（基準組，不接任何 KV connector）
+  vllm-nocache:
+    <<: *engine-common
+    container_name: nocache-vllm
+    ports:
+      - "8002:8000"
+    depends_on:
+      vllm-lmcache:
+        condition: service_healthy
+    volumes:
+      - ${MODEL_DIR:-/mnt/nvme0/mistral-model}:/root/.cache/huggingface
+    environment:
+      VLLM_SERVER_DEV_MODE: "1"
+    entrypoint: ["vllm"]
+    command:
+      - serve
+      - ${LLM_MODEL:-mistralai/Mistral-7B-Instruct-v0.2}
+      - --tensor-parallel-size
+      - "1"
+      - --no-enable-prefix-caching
+      - --enable-prompt-tokens-details
+      - --max-model-len
+      - "32648"
+      - --max-num-batched-tokens
+      - "32768"
+      - --gpu-memory-utilization
+      - "${GPU_UTIL_EACH:-0.30}"
+      - --enforce-eager
