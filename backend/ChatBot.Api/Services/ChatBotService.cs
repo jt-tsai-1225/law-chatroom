@@ -69,6 +69,80 @@ public class ChatBotService : IChatBotService
         CancellationToken cancellationToken = default,
         Func<string, Task>? onTokenDelta = null)
     {
+        try
+        {
+            return await GetReplyCoreAsync(request, cancellationToken, onTokenDelta);
+        }
+        catch
+        {
+            // 這一輪失敗（引擎中斷、串流中途斷線、瀏覽器關閉…）時，
+            // 至少把使用者的提問留在聊天室裡。成功路徑的 PersistAsync 排在最後，
+            // 中途失敗就一個字也沒存，使用者重新整理後會發現自己問過的問題消失了。
+            //
+            // 只存提問、不存殘缺的回答：殘缺的內容下一輪會被當成歷史送回模型，
+            // 而且重新載入後看起來像一則完整的答案。
+            await PersistQuestionOnlyAsync(request);
+            throw;
+        }
+    }
+
+    /// <summary>
+    /// 只把使用者的提問寫進聊天室（回答失敗時用）。
+    ///
+    /// 用 CancellationToken.None：這個方法常在瀏覽器斷線、請求已被取消之後
+    /// 才被呼叫，沿用原本的 token 一定會立刻失敗。
+    ///
+    /// 若聊天室最後一則已經是同一句提問就不再寫——使用者失敗後重試，
+    /// 不該在紀錄裡留下兩則一模一樣的提問。
+    /// 全程不拋例外：這是補救，不能讓補救本身蓋掉原本的錯誤。
+    /// </summary>
+    private async Task PersistQuestionOnlyAsync(ChatRequest request)
+    {
+        if (request.ConversationId is null || !_conversations.IsConfigured)
+        {
+            return;
+        }
+
+        var id = request.ConversationId.Value;
+
+        try
+        {
+            await AppendQuestionIfNewAsync(id, request.Message, CancellationToken.None);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "聊天室 {Id} 的提問補寫失敗（回答本身也已失敗）", id);
+        }
+    }
+
+    /// <summary>
+    /// 寫入使用者的提問，但若聊天室最後一則已經是同一句提問就略過。
+    ///
+    /// 為什麼：回答失敗時我們補存了提問（PersistQuestionOnlyAsync），使用者
+    /// 重試成功後，成功路徑又會再存一次——不去重的話紀錄裡就是兩則一模一樣
+    /// 的提問，下一輪還會一起被送進模型的上下文。
+    /// </summary>
+    private async Task AppendQuestionIfNewAsync(Guid conversationId, string message, CancellationToken ct)
+    {
+        var last = await _conversations.RecentMessagesAsync(conversationId, 1, ct);
+        if (last.Count > 0 && last[0].Role == "user" && last[0].Content == message)
+        {
+            return;
+        }
+
+        await _conversations.AppendAsync(new ConversationMessage
+        {
+            ConversationId = conversationId,
+            Role = "user",
+            Content = message
+        }, ct);
+    }
+
+    private async Task<ChatResponse> GetReplyCoreAsync(
+        ChatRequest request,
+        CancellationToken cancellationToken,
+        Func<string, Task>? onTokenDelta)
+    {
         var totalStopwatch = System.Diagnostics.Stopwatch.StartNew();
 
         await _qdrantService.InitializeCollectionAsync();
@@ -324,12 +398,7 @@ public class ChatBotService : IChatBotService
 
         try
         {
-            await _conversations.AppendAsync(new ConversationMessage
-            {
-                ConversationId = id,
-                Role = "user",
-                Content = request.Message
-            }, ct);
+            await AppendQuestionIfNewAsync(id, request.Message, ct);
 
             await _conversations.AppendAsync(new ConversationMessage
             {
