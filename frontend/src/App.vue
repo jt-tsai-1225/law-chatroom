@@ -289,6 +289,11 @@ async function send() {
 
   const firstTurn = messages.value.length === 0
 
+  // 記下這一輪是在哪個聊天室送出的。串流要幾秒到幾十秒，期間使用者可能
+  // 切到別的聊天室；結束時 activeId 已經是另一個，這時再用它去命名、
+  // 更新摘要或塞錯誤訊息，就會寫到錯的聊天室。
+  const convId = activeId.value
+
   messages.value.push({ role: 'user', content: text, at: new Date() })
   draft.value = ''
   sending.value = true
@@ -343,19 +348,25 @@ async function send() {
       historyUsed: done.historyMessagesUsed
     }
 
-    if (firstTurn) await autoTitle(text)
-    await refreshActiveSummary()
+    // 使用者若已切走：答案伺服器端仍會完整存進原本的聊天室，
+    // 回去時從資料庫載入即可，這裡不要動到現在顯示的那一個。
+    if (activeId.value === convId) {
+      if (firstTurn) await autoTitle(text)
+      await refreshActiveSummary()
+    }
   } catch (err) {
     // 已經吐出來的字保留，後面補一則錯誤訊息；一個字都沒有就把空泡泡收掉
     if (!bot.content) {
       const i = messages.value.indexOf(bot)
       if (i >= 0) messages.value.splice(i, 1)
     }
-    messages.value.push({
-      role: 'error',
-      content: err?.message || describeError(err),
-      at: new Date()
-    })
+    if (activeId.value === convId) {
+      messages.value.push({
+        role: 'error',
+        content: err?.message || describeError(err),
+        at: new Date()
+      })
+    }
 
     // 503 多半是選了一個沒啟動的模式——順手更新可用性，
     // 讓選單立刻反映現況，而不是等使用者再失敗一次
