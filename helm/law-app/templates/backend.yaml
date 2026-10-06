@@ -96,17 +96,23 @@ spec:
             # local 儲存後端的落地處。切到 seaweedfs 後不再寫入，保留掛載是為了能切回去。
             # 用 emptyDir：資料以 SeaweedFS 為準，這裡的內容 Pod 重啟後消失無妨。
             - { name: uploads, mountPath: /app/uploads }
-          # 這個端點只碰 Qdrant，不會送任何 prompt 給模型、不污染 KV 快取。
+          # 探針只確認「後端行程有在聽埠」，不呼叫任何依賴外部資料的端點。
+          #
+          # 為什麼不用 /api/knowledgebase/documents：它會讀 Qdrant 的 legal_documents，
+          # 全新的 Qdrant 還沒有這個 collection，端點回 500，探針永遠失敗——
+          # 第一次部署時後端就永遠不 Ready（Service 沒有後端，前端回 502），
+          # 而 liveness 又會一直把容器殺掉重啟。要匯入法規才會產生這個 collection，
+          # 但沒有 Ready 的後端就沒辦法匯入，等於死結。
           readinessProbe:
-            httpGet: { path: /api/knowledgebase/documents, port: http }
-            periodSeconds: 15
-            timeoutSeconds: 10
-            failureThreshold: 10
+            tcpSocket: { port: http }
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
           livenessProbe:
-            httpGet: { path: /api/knowledgebase/documents, port: http }
+            tcpSocket: { port: http }
             initialDelaySeconds: 30
             periodSeconds: 30
-            timeoutSeconds: 10
+            timeoutSeconds: 5
             failureThreshold: 6
       volumes:
         - name: uploads
