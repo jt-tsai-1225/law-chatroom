@@ -1,15 +1,19 @@
 # law-app：應用層，部署於 ai-apps workspace。
-# 推論引擎（vLLM）在 law-model，部署於 models workspace。
+# 推論引擎（vLLM）不在叢集內：跑在獨立 GPU 主機 10.102.196.201（deploy/compose.vllm.yml）。
+# law-model chart 在這個部署方式下不使用。
 
 # 所有映像都要先推上 Harbor（見 hci-deployment-questions.md 第七節）。
+# HCI Harbor：http://10.102.196.42:32180/，專案 w5tmtc（私有）。
+# ⚠ 專案是私有的：叢集要拉得動，需要 imagePullSecrets（見下方），
+#   或請管理者把專案設為 Public。
 images:
-  backend:   { repository: cr.phison.com/CHANGE_ME/law-backend,  tag: "0.1.0" }
-  frontend:  { repository: cr.phison.com/CHANGE_ME/law-frontend, tag: "0.1.0" }
+  backend:   { repository: 10.102.196.42:32180/w5tmtc/law-backend,  tag: "0.1.0" }
+  frontend:  { repository: 10.102.196.42:32180/w5tmtc/law-frontend, tag: "0.1.0" }
   # ⚠ 第三方映像一律釘版本，不用 latest：Pod 重建時 latest 可能拉到不同版本，
   #   而且事後無從追溯當時跑的是哪一版。
-  postgres:  { repository: cr.phison.com/CHANGE_ME/postgres,     tag: "16-alpine" }
-  qdrant:    { repository: cr.phison.com/CHANGE_ME/qdrant,       tag: "v1.19.1" }
-  seaweedfs: { repository: cr.phison.com/CHANGE_ME/seaweedfs,    tag: "4.48" }
+  postgres:  { repository: 10.102.196.42:32180/w5tmtc/postgres,     tag: "16-alpine" }
+  qdrant:    { repository: 10.102.196.42:32180/w5tmtc/qdrant,       tag: "v1.19.1" }
+  seaweedfs: { repository: 10.102.196.42:32180/w5tmtc/seaweedfs,    tag: "4.48" }
   pullPolicy: IfNotPresent
 
 imagePullSecrets: []
@@ -43,14 +47,15 @@ backend:
 
   # 快取模式 → 推論引擎位址。跨 workspace 要用完整名稱：
   #   http://<引擎 Service>.<namespace>.svc.cluster.local:8000
-  # law-model 安裝後的 NOTES 會印出這幾個值。
   #
   # none 留空：沒有常駐的無快取引擎時，後端會據此回報「未設定端點」，
   # 而不是靜默退回 CacheBlend 讓人以為在比較兩種快取。
   llmEndpoints:
-    cacheblend: "http://law-model-cacheblend.models.svc.cluster.local:8000"
-    lmcache:    "http://law-model-lmcache.models.svc.cluster.local:8000"
-    none:       ""
+    # 引擎不在叢集內，在獨立 GPU 主機 10.102.196.201（deploy/compose.vllm.yml，GPU 3）。
+    # 叢集的 Pod 必須連得到這三個埠；部署後用 NOTES 裡的連線測試確認。
+    cacheblend: "http://10.102.196.201:8000"
+    lmcache:    "http://10.102.196.201:8001"
+    none:       "http://10.102.196.201:8002"
 
   llmModel: mistralai/Mistral-7B-Instruct-v0.2
 
