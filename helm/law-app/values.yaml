@@ -8,7 +8,7 @@
 #   或請管理者把專案設為 Public。
 images:
   backend:   { repository: 10.102.196.43:32180/fjjlg5/law-backend,  tag: "0.1.0" }
-  frontend:  { repository: 10.102.196.43:32180/fjjlg5/law-frontend, tag: "0.1.0" }
+  frontend:  { repository: 10.102.196.43:32180/fjjlg5/law-frontend, tag: "0.1.1" }
   # ⚠ 第三方映像一律釘版本，不用 latest：Pod 重建時 latest 可能拉到不同版本，
   #   而且事後無從追溯當時跑的是哪一版。
   postgres:  { repository: 10.102.196.43:32180/fjjlg5/postgres,     tag: "16-alpine" }

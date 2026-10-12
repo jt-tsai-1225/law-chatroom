@@ -619,8 +619,8 @@ onUnmounted(stopPolling)
       <div class="panel">
         <div class="thread" ref="scroller">
           <p v-if="messages.length === 0" class="empty">
-            問一個民法或公司法的問題，例如：<br />
-            「公司重整時，董事拒絕移交帳冊文件，會被處以多少罰金？」
+            問一個法律相關的問題，例如：<br />
+            「股份有限公司至少要有幾人為發起人？」
           </p>
 
           <div v-for="(m, i) in messages" :key="i" :class="['turn', m.role, { streaming: m.streaming }]">
