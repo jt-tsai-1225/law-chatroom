@@ -103,3 +103,6 @@ backend/ChatBot.Api/uploads/
 
 # opencode 專案記憶（僅本機使用，不進版控）
 AGENTS.md
+
+# 單元測試與覆蓋率輸出
+TestResults/

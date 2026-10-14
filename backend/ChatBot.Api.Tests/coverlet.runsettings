@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  coverlet 的覆蓋率設定。由 dotnet test 的 settings 參數帶入（見 run-tests.sh）。
+
+  ⚠ 這裡的排除清單決定報表上的數字，請與團隊對齊後再調整。
+  排除的都是「必須連到真實外部系統才有意義」的轉接層，單元測試測不到，
+  應由整合測試（compose 起 Qdrant／Postgres／SeaweedFS）涵蓋：
+
+    Program                 組裝根（DI 註冊、middleware）
+    QdrantService           Qdrant gRPC client 的薄包裝
+    SeaweedObjectStorage    AWS S3 SDK 的薄包裝
+    ConversationStore       Npgsql 直連，SQL 都在這裡
+    LegalDocumentParser     以子行程呼叫 python3 tools/parse_pdf.py
+
+  想看「完全不排除」的真實數字，把 <Exclude> 與 <ExcludeByFile> 兩行刪掉即可。
+-->
+<RunSettings>
+  <DataCollectionRunSettings>
+    <DataCollectors>
+      <DataCollector friendlyName="XPlat Code Coverage">
+        <Configuration>
+          <Format>cobertura</Format>
+          <IncludeTestAssembly>false</IncludeTestAssembly>
+          <SkipAutoProps>true</SkipAutoProps>
+          <ExcludeByFile>**/Program.cs</ExcludeByFile>
+          <Exclude>[ChatBot.Api]ChatBot.Api.Services.QdrantService*,[ChatBot.Api]ChatBot.Api.Services.SeaweedObjectStorage*,[ChatBot.Api]ChatBot.Api.Services.ConversationStore*,[ChatBot.Api]ChatBot.Api.Services.LegalDocumentParser*</Exclude>
+        </Configuration>
+      </DataCollector>
+    </DataCollectors>
+  </DataCollectionRunSettings>
+</RunSettings>
