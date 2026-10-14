@@ -39,6 +39,8 @@ public interface ILLMService
     /// 若送字串由伺服端 tokenize，分隔符會與相鄰文字合併成不同的 token，
     /// 片段邊界就對不上、快取永遠不命中。組裝的工作在 PromptBuilder。
     /// </summary>
+    /// <param name="promptTokens">已組好的 prompt token id 陣列（由 PromptBuilder 產生）。</param>
+    /// <param name="cancellationToken">取消權杖；瀏覽器斷線時用來中斷生成讀取。</param>
     /// <param name="maxTokens">
     /// 覆寫這一次的生成長度上限；省略時使用 RAGSettings.LlmMaxTokens。
     /// KV 預熱會傳 1——預熱只需要引擎把 prompt 算過一遍好把 KV 寫進快取，
