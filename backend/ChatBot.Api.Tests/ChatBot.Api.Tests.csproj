@@ -19,7 +19,7 @@
     </PackageReference>
     <!-- 4.20.0–4.20.1 帶有會外送資料的 SponsorLink，4.20.2 起移除；固定在新版 -->
     <PackageReference Include="Moq" Version="4.20.72" />
-    <!-- 覆蓋率用 collector 方式收集（dotnet test --collect:"XPlat Code Coverage"） -->
+    <!-- 覆蓋率用 collector 方式收集（dotnet test collect "XPlat Code Coverage"） -->
     <PackageReference Include="coverlet.collector" Version="6.0.2">
       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
       <PrivateAssets>all</PrivateAssets>
