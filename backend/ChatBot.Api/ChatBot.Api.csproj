@@ -5,6 +5,15 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <DockerDefaultTargetOS>Linux</DockerDefaultTargetOS>
+
+    <!--
+      輸出 XML 文件檔（ChatBot.Api.xml），Program.cs 的 IncludeXmlComments 會讀它，
+      把控制器上的 /// 註解顯示在 Swagger UI。
+      1591（公開成員缺 XML 註解）關掉：DTO 欄位很多，逐一補註解的雜訊大於價值，
+      有寫的註解照常顯示。
+    -->
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <NoWarn>$(NoWarn);1591</NoWarn>
   </PropertyGroup>
 
   <ItemGroup>

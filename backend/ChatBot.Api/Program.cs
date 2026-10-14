@@ -1,13 +1,35 @@
 using ChatBot.Api.Services;
 using Qdrant.Client;
 using ChatBot.Api.Configuration;
+using Microsoft.OpenApi.Models;
 
 var builder = WebApplication.CreateBuilder(args);
 
 // Add services to the container.
 builder.Services.AddControllers();
 builder.Services.AddEndpointsApiExplorer();
-builder.Services.AddSwaggerGen();
+builder.Services.AddSwaggerGen(options =>
+{
+    options.SwaggerDoc("v1", new OpenApiInfo
+    {
+        Title = "法律 RAG 聊天室 API",
+        Version = "v1",
+        Description =
+            "法律條文問答後端。同一個問題可選三種 KV 快取模式（CacheBlend／LMCache 前綴快取／無快取）比較 TTFT 與命中率。\n\n" +
+            "• 問答：`POST /api/chat`（一次回完）、`POST /api/chat/stream`（SSE 串流）\n" +
+            "• 聊天室：`/api/conversations`\n" +
+            "• 知識庫：`/api/knowledgebase`（上傳、預熱、檢索、刪除）\n" +
+            "• 快取與診斷：`/api/cache`、`/api/cachemodes`、`/api/diagnostics`"
+    });
+
+    // 讀控制器上的 /// 註解。檔案由 csproj 的 GenerateDocumentationFile 產生；
+    // 找不到時（例如用不含 XML 的方式發佈）只是少了說明文字，不讓服務起不來。
+    var xmlPath = Path.Combine(AppContext.BaseDirectory, $"{typeof(Program).Assembly.GetName().Name}.xml");
+    if (File.Exists(xmlPath))
+    {
+        options.IncludeXmlComments(xmlPath, includeControllerXmlComments: true);
+    }
+});
 
 // CORS policy
 builder.Services.AddCors(options =>
@@ -124,10 +146,23 @@ using (var scope = app.Services.CreateScope())
 }
 
 // Configure the HTTP request pipeline.
-if (app.Environment.IsDevelopment())
+//
+// Swagger 在 Development 一律開；其他環境用 Swagger:Enabled（環境變數 Swagger__Enabled）決定。
+// 這樣「正式環境要不要對外露出 API 文件」是一個獨立的開關，不必為了它把整個
+// ASPNETCORE_ENVIRONMENT 留在 Development（那會連帶打開詳細錯誤頁）。
+var swaggerEnabled = app.Environment.IsDevelopment()
+    || builder.Configuration.GetValue<bool>("Swagger:Enabled");
+
+if (swaggerEnabled)
 {
     app.UseSwagger();
-    app.UseSwaggerUI();
+    app.UseSwaggerUI(options =>
+    {
+        // 相對路徑：經 nginx 轉發（/swagger/ 或 /docs 轉址）時也找得到 swagger.json
+        options.SwaggerEndpoint("v1/swagger.json", "法律 RAG 聊天室 API v1");
+        options.DocumentTitle = "法律 RAG 聊天室 API";
+        options.DisplayRequestDuration();
+    });
 }
 
 app.UseHttpsRedirection();

@@ -65,7 +65,10 @@ public class ConversationsController : ControllerBase
         }
     }
 
+    /// <summary>建立聊天室。標題可省略，由後端給預設名稱。</summary>
     [HttpPost]
+    [ProducesResponseType(typeof(Conversation), StatusCodes.Status201Created)]
+    [ProducesResponseType(StatusCodes.Status503ServiceUnavailable)]
     public async Task<ActionResult<Conversation>> Create(
         [FromBody] CreateConversationRequest? request, CancellationToken ct)
     {
@@ -83,7 +86,12 @@ public class ConversationsController : ControllerBase
         }
     }
 
+    /// <summary>更改聊天室標題。</summary>
     [HttpPatch("{id:guid}")]
+    [ProducesResponseType(StatusCodes.Status204NoContent)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    [ProducesResponseType(StatusCodes.Status503ServiceUnavailable)]
     public async Task<IActionResult> Rename(
         Guid id, [FromBody] RenameConversationRequest request, CancellationToken ct)
     {
@@ -109,6 +117,9 @@ public class ConversationsController : ControllerBase
 
     /// <summary>刪除聊天室。底下的訊息由外鍵的 ON DELETE CASCADE 一併清掉。</summary>
     [HttpDelete("{id:guid}")]
+    [ProducesResponseType(StatusCodes.Status204NoContent)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    [ProducesResponseType(StatusCodes.Status503ServiceUnavailable)]
     public async Task<IActionResult> Delete(Guid id, CancellationToken ct)
     {
         if (!_store.IsConfigured) return NotConfigured();

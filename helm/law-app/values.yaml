@@ -72,6 +72,10 @@ backend:
   # Development 會顯示詳細錯誤並啟用 Swagger（/docs）。對外正式上線前改 Production。
   aspnetcoreEnvironment: Development
 
+  # 非 Development 時是否仍提供 Swagger（/swagger、/docs）。Development 下不論此值都會開。
+  swagger:
+    enabled: true
+
   extraEnv: []
   resources:
     requests: { cpu: 500m, memory: 1Gi }

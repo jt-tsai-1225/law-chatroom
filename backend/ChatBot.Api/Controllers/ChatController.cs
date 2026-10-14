@@ -27,7 +27,20 @@ public class ChatController : ControllerBase
         _cacheService = cacheService;
     }
 
+    /// <summary>
+    /// 提問（一次回完整答案）。
+    /// 可用 cacheMode 選快取模式（cacheblend／lmcache／none），
+    /// 回應附 TTFT、總耗時、KV 命中等量測欄位。
+    /// </summary>
+    /// <response code="200">成功，回傳答案與量測資料</response>
+    /// <response code="400">問題為空</response>
+    /// <response code="500">處理失敗（訊息不含內部細節，細節在伺服器記錄）</response>
+    /// <response code="503">選的快取模式目前沒有部署或連不上</response>
     [HttpPost]
+    [ProducesResponseType(typeof(ChatResponse), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(StatusCodes.Status500InternalServerError)]
+    [ProducesResponseType(StatusCodes.Status503ServiceUnavailable)]
     public async Task<ActionResult<ChatResponse>> Chat([FromBody] ChatRequest request)
     {
         try
@@ -68,8 +81,16 @@ public class ChatController : ControllerBase
     /// 查無條文前的檢索錯誤），仍以 HTTP 狀態碼回報（503/500/400），
     /// 與 /api/chat 相同語意，前端能用同一套錯誤處理。
     /// </summary>
+    /// <response code="200">SSE 串流（delta／done／error 事件）</response>
+    /// <response code="400">問題為空</response>
+    /// <response code="500">第一個字送出前失敗</response>
+    /// <response code="503">選的快取模式目前沒有部署或連不上</response>
     [HttpPost("stream")]
     [Produces("text/event-stream")]
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(StatusCodes.Status500InternalServerError)]
+    [ProducesResponseType(StatusCodes.Status503ServiceUnavailable)]
     public async Task ChatStream([FromBody] ChatRequest request, CancellationToken cancellationToken)
     {
         if (string.IsNullOrWhiteSpace(request.Message))
@@ -168,6 +189,7 @@ public class ChatController : ControllerBase
         }
     }
 
+    /// <summary>服務存活檢查（不碰任何外部相依）。</summary>
     [HttpGet("health")]
     public ActionResult<object> HealthCheck()
     {
@@ -181,9 +203,13 @@ public class ChatController : ControllerBase
     }
 
     /// <summary>
-    /// 執行基準測試
+    /// 執行基準測試：每個問題各問 Iterations 次，回傳 TTFT、總耗時、吞吐的統計。
     /// </summary>
+    /// <response code="400">Questions 為空</response>
     [HttpPost("benchmark")]
+    [ProducesResponseType(typeof(BenchmarkResponse), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(StatusCodes.Status500InternalServerError)]
     public async Task<ActionResult<BenchmarkResponse>> RunBenchmark([FromBody] BenchmarkRequest request)
     {
         try

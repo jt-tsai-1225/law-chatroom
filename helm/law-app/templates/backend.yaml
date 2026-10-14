@@ -49,6 +49,7 @@ spec:
             - { name: http, containerPort: 8000 }
           env:
             - { name: ASPNETCORE_ENVIRONMENT, value: {{ .Values.backend.aspnetcoreEnvironment | quote }} }
+            - { name: Swagger__Enabled, value: {{ .Values.backend.swagger.enabled | quote }} }
 
             # ── 密碼。必須排在引用它的變數之前：k8s 的 $(VAR) 只展開「已經定義過」的變數。
             - name: POSTGRES_PASSWORD
