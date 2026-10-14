@@ -322,7 +322,9 @@ public class KnowledgeBaseControllerTests
             null,
             It.IsAny<CancellationToken>()), Times.Once);
         var withJson = TestFactory.ToJson(Assert.IsType<OkObjectResult>(warmupResult).Value);
-        Assert.Equal(2, withJson.GetProperty("warmup").GetProperty("processedChunks").GetInt32());
+        // warmup 是 WarmupProgress 物件本身，測試用的預設序列化不轉 camelCase，欄位名稱維持 PascalCase
+        // （實際 API 由 ASP.NET 序列化，輸出是 camelCase）
+        Assert.Equal(2, withJson.GetProperty("warmup").GetProperty("ProcessedChunks").GetInt32());
     }
 
     // ════════════════════════════════════════════════════════════
